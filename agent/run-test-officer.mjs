@@ -128,7 +128,8 @@ function parseApiSmoke(out) {
         type: 'api',
         status: m[1] === 'PASS' ? 'pass' : 'fail',
         severity: m[1] === 'PASS' ? '-' : 'high',
-        rootCause: /应付|库存/.test(name) ? name : '-',
+        // 通用：失败用例的 rootCause 直接用可读的 check 名，不做任何业务关键词特判
+        rootCause: m[1] === 'PASS' ? '-' : name,
         repro: 'node smoke/api-smoke.mjs',
       };
       results.push(cur);
@@ -139,14 +140,19 @@ function parseApiSmoke(out) {
 
 async function runInWorktree(targetRef, testFiles) {
   const wt = path.join(os.tmpdir(), `aio-${Date.now()}`);
-  await git(repoDir, 'worktree', 'add', '--detach', wt, targetRef);
-  const sutInWt = path.join(wt, path.relative(ROOT, repoDir)); // worktree 含整个仓库树，SUT 在 wt/<相对路径>
-  // 把仓库内绝对测试路径映射到 worktree 内对应路径（精准选测的子集，或全量兜底）
-  const wtTestFiles = testFiles.map((f) => path.join(sutInWt, path.relative(repoDir, f)));
-  const runTests = wtTestFiles.length ? wtTestFiles : globSync(path.join(sutInWt, 'tests', '*.test.js'));
-  const testOut = await run(sutInWt, 'node', ['--test', ...runTests]);
-  const smokeOut = await run(sutInWt, 'node', ['smoke/api-smoke.mjs']);
-  await git(repoDir, 'worktree', 'remove', '--force', wt);
+  let testOut, smokeOut;
+  try {
+    await git(repoDir, 'worktree', 'add', '--detach', wt, targetRef);
+    const sutInWt = path.join(wt, path.relative(ROOT, repoDir)); // worktree 含整个仓库树，SUT 在 wt/<相对路径>
+    // 把仓库内绝对测试路径映射到 worktree 内对应路径（精准选测的子集，或全量兜底）
+    const wtTestFiles = testFiles.map((f) => path.join(sutInWt, path.relative(repoDir, f)));
+    const runTests = wtTestFiles.length ? wtTestFiles : globSync(path.join(sutInWt, 'tests', '*.test.js'));
+    testOut = await run(sutInWt, 'node', ['--test', ...runTests]);
+    smokeOut = await run(sutInWt, 'node', ['smoke/api-smoke.mjs']);
+  } finally {
+    // 无论成功或失败都清理 worktree，避免 detached 分支/工作树残留污染仓库
+    await git(repoDir, 'worktree', 'remove', '--force', wt).catch(() => {});
+  }
   return { unit: parseNodeTest(testOut.out), api: parseApiSmoke(smokeOut.out) };
 }
 
@@ -242,7 +248,7 @@ async function main() {
       { step: `读需求文档 ${req.id}`, why: '拆解测试点，明确应验证的能力' },
       { step: `关联代码模块（${impact.srcFiles.length} 个）`, why: '把需求点映射到实现源码' },
       sel.narrowed ? { step: `仅跑受影响测试（${sel.testFiles.length} 个）`, why: sel.reason } : { step: '跑全量单测', why: sel.reason },
-      { step: '跑 API 冒烟', why: '端到端验证核心链路（前端体验）' },
+      { step: '跑 API 端到端冒烟', why: '真实 API 端到端验证核心下单链路' },
       { step: '产出需求覆盖度报告', why: `已覆盖 ${covered} / 缺口 ${gaps} / 不达标 ${failingPts}` },
     ];
     const report = {
@@ -285,7 +291,7 @@ async function main() {
     sel.narrowed
       ? { step: `仅跑受影响测试（${sel.testFiles.length} 个）`, why: sel.reason }
       : { step: '跑全量单测 node --test', why: sel.reason },
-    { step: '跑 API 冒烟', why: '端到端验证核心链路（前端体验）' },
+    { step: '跑 API 端到端冒烟', why: '真实 API 端到端验证核心下单链路' },
   ];
 
   const report = {
