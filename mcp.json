@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "gongfeng": {
+      "description": "工蜂(TGit) MCP：读取 PR/MR diff、提交、文件，用于场景 A 理解代码改动",
+      "command": "npx",
+      "args": ["-y", "@tencent/tgit-mcp-server"],
+      "env": { "TGG_TOKEN": "${TGIT_TOKEN}" }
+    },
+    "tapd": {
+      "description": "TAPD MCP：读取需求/缺陷/用例，用于场景 B/C 关联与需求拆解",
+      "command": "npx",
+      "args": ["-y", "@tencent/tapd-mcp-server"],
+      "env": { "TAPD_API_USER": "${TAPD_API_USER}", "TAPD_API_PASSWORD": "${TAPD_API_PASSWORD}" }
+    },
+    "playwright": {
+      "description": "Playwright MCP：驱动真实浏览器验证前端体验",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "knot-bot": {
+      "description": "企微机器人 / Knot webhook：将测试报告实时推送给开发或值班（场景 C）",
+      "url": "${WEBHOOK_URL}"
+    }
+  }
+}

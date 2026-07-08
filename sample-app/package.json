@@ -1,0 +1,14 @@
+{
+  "name": "sample-app",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "迷你电商「下单/优惠券」全栈应用 —— 作为「AI 测试官」的被测对象(SUT)",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests",
+    "test:coupon": "node --test tests/coupon.test.js",
+    "smoke:api": "node smoke/api-smoke.mjs",
+    "smoke:ui": "playwright test smoke/ui-smoke.spec.js"
+  },
+  "license": "MIT"
+}

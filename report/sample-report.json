@@ -1,0 +1,44 @@
+{
+  "meta": {
+    "title": "AI 测试官报告（示例）",
+    "repo": "sample-app",
+    "scenario": "A",
+    "triggeredBy": "指令：测一下刚提的 feature/coupon-bug 分支",
+    "generatedAt": "2026-07-08T17:00:00+08:00"
+  },
+  "impact": {
+    "changedFiles": ["src/coupon.js"],
+    "changedFunctions": ["applyCouponStack"],
+    "risk": "折扣券计算错误（9 折变成 1 折），导致订单金额严重偏低、公司资损",
+    "affectedScenarios": ["下单-使用折扣券", "购物车结算"]
+  },
+  "plan": [
+    { "step": "读 diff / git 对比", "why": "定位改动落在 applyCouponStack 的 percent 分支" },
+    { "step": "跑 coupon 单测", "why": "直接覆盖被改函数，验证折扣计算" },
+    { "step": "跑 API 冒烟", "why": "端到端验证 9 折券下单金额，覆盖前端体验链路" }
+  ],
+  "results": [
+    {
+      "name": "coupon.test.js > 折扣券：9 折应付 90%",
+      "type": "unit",
+      "status": "fail",
+      "severity": "high",
+      "rootCause": "applyCouponStack 中 percent 分支误用 price*(percentOff/100)，应为 price*(1-percentOff/100)，导致 9 折变 1 折",
+      "repro": "node --test tests/coupon.test.js"
+    },
+    {
+      "name": "api-smoke: 9 折券下单应付 26910 分",
+      "type": "api",
+      "status": "fail",
+      "severity": "high",
+      "rootCause": "同上，金额计算错误使 29900 分被算成 2990 分",
+      "repro": "node smoke/api-smoke.mjs"
+    }
+  ],
+  "summary": {
+    "total": 2,
+    "pass": 0,
+    "fail": 2,
+    "blocking": ["折扣券资损 bug 必须修复后方可合入；建议补充金额精度与边界单测"]
+  }
+}

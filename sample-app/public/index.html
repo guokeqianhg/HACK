@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>迷你电商 · 下单/优惠券</title>
+  <link rel="stylesheet" href="/public/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>🛒 迷你电商 Demo</h1>
+    <p class="sub">AI 测试官 · 被测对象(SUT)</p>
+  </header>
+
+  <main>
+    <section id="products" data-testid="product-list">
+      <h2>商品</h2>
+      <ul id="product-items"></ul>
+    </section>
+
+    <section id="cart">
+      <h2>购物车</h2>
+      <ul id="cart-items" data-testid="cart-items"></ul>
+      <div class="coupon-row">
+        <label>折扣券(减%): <input id="coupon-percent" type="number" value="10" min="0" max="100" data-testid="coupon-input" /></label>
+        <button id="checkout" data-testid="checkout-btn">结算</button>
+      </div>
+      <div id="result" data-testid="result"></div>
+    </section>
+  </main>
+
+  <script type="module" src="/public/app.js"></script>
+</body>
+</html>
