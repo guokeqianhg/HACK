@@ -1,10 +1,15 @@
-# 临时测试/冒烟输出
+# 生成的报告与临时产物
+report/index.html
+report/report.json
+agent/.aio.out.txt
+agent/.debug-test.txt
+agent/.debug-smoke.txt
+agent/.debug-out.txt
+
+# 示例应用临时输出
 sample-app/.testout.txt
 sample-app/.bugtest.txt
 sample-app/.bugsmoke.txt
-
-# 生成的报告看板（由 report/generate-report.mjs 产出）
-report/index.html
 
 # 依赖
 node_modules/
