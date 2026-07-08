@@ -1,12 +1,30 @@
 // 读 report/report.json → 生成 report/index.html 可视化看板
 // 运行：node report/generate-report.mjs
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, access } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const inPath = path.join(__dirname, 'report.json');
 const outPath = path.join(__dirname, 'index.html');
+
+// 输入优先级：命令行参数 > report.json > sample-report.json（演示样例）
+async function resolveInput() {
+  const candidates = [
+    process.argv[2],
+    path.join(__dirname, 'report.json'),
+    path.join(__dirname, 'sample-report.json'),
+  ].filter(Boolean);
+  for (const c of candidates) {
+    try {
+      await access(c);
+      return c;
+    } catch {
+      /* try next */
+    }
+  }
+  throw new Error('未找到报告输入（report.json / sample-report.json）');
+}
+const inPath = await resolveInput();
 
 const data = JSON.parse(await readFile(inPath, 'utf8'));
 const meta = data.meta || {};
