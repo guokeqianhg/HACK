@@ -50,7 +50,7 @@ cd sample-app
 git diff main feature/coupon-bug   # 查看改动（单文件：折扣券 9 折算成 1 折）
 ```
 真实可跑：AI 测试官读取 diff → 影响分析 → 运行 `node --test` 与 `node smoke/api-smoke.mjs` → 生成含严重级别/根因/复现的报告。
-（在 `main` 上跑结果为 14 通过 / 0 失败；在 `feature/coupon-bug` 上为 14 通过 / 4 失败，暴露资损 bug。）
+（在 `main` 上跑结果为 18 通过 / 0 失败；在 `feature/coupon-bug` 上为 14 通过 / 4 失败，暴露资损 bug。）
 
 ## 演示「持续巡检 + 异常推送」(场景 C)
 场景 C 不依赖代码改动，而是**定时对目标分支做全量回归**，发现失败用例时通过企微机器人 webhook 推送告警，并用状态文件去重避免刷屏。
@@ -78,6 +78,34 @@ node agent/cron-monitor.mjs --branch feature/coupon-bug
 | 提示词 | `执行 AI 测试官场景 C 持续巡检：在仓库 f:/HACK 运行 node agent/cron-monitor.mjs --once --branch main。脚本会全量回归并（若异常）经企微 webhook 推送告警、状态去重。运行后无需额外操作；若输出异常请简要汇总失败数与严重级。` |
 
 > 注：当前 automation 桥接不可用时，可用系统调度器兜底——Windows `schtasks /create /tn "AICron" /tr "node f:/HACK/agent/cron-monitor.mjs --once --branch main" /sc hourly`；或 Linux/Mac 的 `crontab -e` 加 `0 * * * * cd /f/HACK && node agent/cron-monitor.mjs --once --branch main`。
+
+## 离线一键 Demo（串起场景 A / B / C）
+一条命令跑通三场景并生成聚合总览页，评审现场零依赖、可重复：
+```bash
+node agent/demo.mjs
+# 产物：
+#   report/index-demo.html        总览页（聚合入口，含场景卡片与覆盖度摘要）
+#   report/report-A.html          场景 A：代码改动 → 精准选测 → 真实跑测
+#   report/report-B.html          场景 B：需求文档 → 覆盖度报告
+#   report/report-C-healthy.html  场景 C：定时巡检（健康基线）
+#   report/report-C-alert.html     场景 C：定时巡检（异常告警）
+```
+也可单独运行任一场景：
+```bash
+# 场景 A：diff 驱动精准选测
+node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
+# 场景 B：需求驱动覆盖度（离线 fixture 模拟 TAPD 需求）
+node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario B --requirement sample-app/docs/requirement-demo.json
+# 场景 C：定时巡检（同 P4，见上）
+node agent/cron-monitor.mjs --branch main
+```
+
+## 可视化报告
+报告看板 `report/index*.html` 由 `report/generate-report.mjs` 渲染（纯内联 CSS/JS，离线可用），包含：
+- **AI 测试官过程时间线**：理解变更 → 影响面分析 → 选测策略 → 执行验证 → 生成报告，逐步可视化（异常步高亮）。
+- **通过率进度条**：总用例 / 通过 / 失败 + 通过率百分比。
+- **需求覆盖度矩阵（场景 B）**：每个需求测试点的状态（✅ 已覆盖 / ❌ 不达标 / ⚠️ 测试缺口）与关联测试文件，直接暴露测试盲区。
+- **执行结果表**：用例 / 类型 / 状态 / 严重级 / 根因 / 复现。
 
 ## 平台能力（Box/CodeBuddy）
 - **TGit/工蜂 MCP**：读 PR/MR diff（场景 A）
