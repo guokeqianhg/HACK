@@ -1,8 +1,12 @@
 # 生成的报告与临时产物
 report/index.html
 report/report.json
+report/report-*.json
+report/report-*.html
+report/index-demo.html
 report/.monitor-state.json
 report/.monitor-last-message.md
+report/_*.log
 agent/.aio.out.txt
 agent/.debug-test.txt
 agent/.debug-smoke.txt
