@@ -15,6 +15,13 @@ import path from 'node:path';
 import { globSync } from 'node:fs';
 
 const TEST_RE = /\.(test|spec)\.[mc]?js$/;
+// 本执行引擎用 `node --test` 跑测，只认 node 原生测试文件（*.test.js / *-test.js / test-*.js）。
+// *.spec.js 是 Playwright/Vitest 等框架的通行约定，需其独立 runner，不能交给 node --test。
+// 此举基于「测试运行器约定」做通用过滤，不针对任何具体业务场景。
+function isRunnableTest(p) {
+  const b = path.basename(p);
+  return /\.(test)\.[mc]?js$/.test(b) || /(^|[-_])test\.[mc]?js$/.test(b) || /^test-.*\.[mc]?js$/.test(b);
+}
 const SOURCE_RE = /\.[mc]?js$/; // 仅把 js 系当源码（测试也是 js，但被 TEST_RE 排除）
 
 export function isTestFile(p) {
@@ -94,9 +101,10 @@ const BROAD_IMPACT = /(^|\/)(package\.json|package-lock\.json|pnpm-lock\.yaml|ya
 // changedFiles: 来自 git diff，路径相对于 git 仓库根（可能含 SUT 子目录前缀）
 // repoDir: 实际被测目录（绝对）；gitRoot: git 仓库根（绝对）
 export function selectTests({ repoDir, gitRoot, changedFiles }) {
-  const allTests = allJsFiles(repoDir).filter(isTestFile);
+  // 可运行全集：仅 node --test 能跑的文件（排除 *.spec.js 等需独立 runner 的框架文件）
+  const runnable = allJsFiles(repoDir).filter(isRunnableTest);
   if (!changedFiles || changedFiles.length === 0) {
-    return { testFiles: allTests, narrowed: false, reason: '无改动（全量回归）' };
+    return { testFiles: runnable, narrowed: false, reason: '无改动（全量回归）' };
   }
 
   const repoRel = path.relative(gitRoot, repoDir); // SUT 相对 git 根，可能为空
@@ -107,7 +115,7 @@ export function selectTests({ repoDir, gitRoot, changedFiles }) {
 
   const broad = changedFiles.filter((f) => BROAD_IMPACT.test(f));
   if (broad.length) {
-    return { testFiles: allTests, narrowed: false, reason: `含全局影响文件（${broad.join(', ')}），回退全量回归` };
+    return { testFiles: runnable, narrowed: false, reason: `含全局影响文件（${broad.join(', ')}），回退全量回归` };
   }
 
   const changedTestAbs = [];
@@ -119,19 +127,19 @@ export function selectTests({ repoDir, gitRoot, changedFiles }) {
     else if (isSourceFile(abs)) changedSrcAbs.push(abs);
   }
 
-  const picked = new Set(changedTestAbs);
+  const picked = new Set(changedTestAbs.filter(isRunnableTest));
 
   // 启发式 3：导入图反向可达（传递依赖）
   for (const s of changedSrcAbs) {
     for (const t of reverseReachableTests(repoDir, s)) {
-      if (isTestFile(t)) picked.add(t);
+      if (isRunnableTest(t)) picked.add(t);
     }
   }
 
   // 启发式 4：同名/同干兜底
   for (const s of changedSrcAbs) {
     const stem = stemOf(s);
-    for (const t of allTests) {
+    for (const t of runnable) {
       const ts = stemOf(t);
       if (ts === stem || ts.startsWith(stem) || stem.startsWith(ts)) picked.add(t);
     }
@@ -139,11 +147,11 @@ export function selectTests({ repoDir, gitRoot, changedFiles }) {
 
   const pickedArr = [...picked];
   if (!pickedArr.length) {
-    return { testFiles: allTests, narrowed: false, reason: '未能将改动关联到测试，回退全量回归' };
+    return { testFiles: runnable, narrowed: false, reason: '未能将改动关联到测试，回退全量回归' };
   }
   return {
     testFiles: pickedArr,
     narrowed: true,
-    reason: `按导入图/同名关联出 ${pickedArr.length}/${allTests.length} 个测试文件`,
+    reason: `按导入图/同名关联出 ${pickedArr.length}/${runnable.length} 个测试文件`,
   };
 }
