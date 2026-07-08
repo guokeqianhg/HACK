@@ -37,13 +37,20 @@ node report/generate-report.mjs   # 读取 report/report.json → report/index.h
 ```
 
 ## 演示「代码改动→针对性测试」(场景 A)
-仓库含 `main`（正确）与 `feature/coupon-bug`（故意引入折扣券 bug）两个分支：
+仓库含 `main`（正确）与 `feature/coupon-bug`（故意引入折扣券 bug）两个分支。
+
+**一键真实闭环**（推荐）：执行引擎自动 `git diff` → 用 worktree 在目标分支真实跑测 → 生成 `report/report.json` → 渲染 `report/index.html`，全程不切分支、不污染工作树：
+```bash
+node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
+# 输出：影响面分析 + 真实跑测结果 + 报告看板 report/index.html
+```
+手动验证分支差异：
 ```bash
 cd sample-app
-git diff main feature/coupon-bug   # 查看改动
-git checkout feature/coupon-bug && npm test   # 在 bug 分支跑测 → coupon 单测失败，AI 测试官据此定位资损 bug
+git diff main feature/coupon-bug   # 查看改动（单文件：折扣券 9 折算成 1 折）
 ```
 真实可跑：AI 测试官读取 diff → 影响分析 → 运行 `node --test` 与 `node smoke/api-smoke.mjs` → 生成含严重级别/根因/复现的报告。
+（在 `main` 上跑结果为 14 通过 / 0 失败；在 `feature/coupon-bug` 上为 14 通过 / 4 失败，暴露资损 bug。）
 
 ## 平台能力（Box/CodeBuddy）
 - **TGit/工蜂 MCP**：读 PR/MR diff（场景 A）
