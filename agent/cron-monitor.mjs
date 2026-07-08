@@ -101,7 +101,7 @@ async function checkOnce() {
       if (f.rootCause && f.rootCause !== '-') lines.push(`  \`${f.rootCause.slice(0, 160)}\``);
     }
     if (failItems.length > 10) lines.push(`- …其余 ${failItems.length - 10} 项`);
-    if (impact?.risk && impact.risk !== '改动未命中已知高风险模块') lines.push('', `**风险：** ${impact.risk}`);
+    if (impact?.selectionReason) lines.push('', `**选测：** ${impact.selectionReason}`);
     lines.push('', '**建议：** 修复后复测通过方可合入/发布。详见 report/index.html');
   } else {
     lines.push('', '全部用例通过，无异常。');

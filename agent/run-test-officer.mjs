@@ -15,6 +15,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { globSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { selectTests, isSourceFile, isTestFile } from './select-tests.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -48,18 +49,17 @@ function analyzeDiff(diffText) {
       [...diffText.matchAll(/@@[^\n]*@@\s*(.+?)\s*$/gm)].map((m) => m[1].trim()).filter(Boolean),
     ),
   ];
-  const riskRules = [
-    { match: 'src/coupon.js', risk: '优惠计算错误可能导致资损（如折扣/满减算错导致订单金额异常）', scene: '下单-使用优惠券' },
-    { match: 'src/inventory.js', risk: '库存扣减错误可能导致超卖或少卖', scene: '下单-库存校验' },
-    { match: 'src/order.js', risk: '下单编排错误可能导致下单失败或金额错误', scene: '下单链路' },
-    { match: 'src/server.js', risk: '接口错误可能导致前端请求失败或返回错误数据', scene: '前端体验' },
-  ];
-  const risks = changedFiles
-    .map((f) => riskRules.find((r) => f.endsWith(r.match)))
-    .filter(Boolean);
-  const risk = risks.map((r) => r.risk).join('；') || '改动未命中已知高风险模块';
-  const affectedScenarios = [...new Set(risks.map((r) => r.scene))];
-  return { changedFiles, changedFunctions, risk, affectedScenarios };
+  // 通用影响面：仅基于文件类型归类，不含任何业务语义硬编码
+  const srcFiles = changedFiles.filter(isSourceFile);
+  const testFiles = changedFiles.filter(isTestFile);
+  const otherFiles = changedFiles.filter((f) => !isSourceFile(f) && !isTestFile(f));
+  let scope;
+  if (changedFiles.length === 0) scope = '无改动（全量回归）';
+  else if (srcFiles.length && testFiles.length) scope = `源码与测试同步改动（${srcFiles.length} 源码 / ${testFiles.length} 测试）`;
+  else if (testFiles.length && !srcFiles.length) scope = '仅测试改动';
+  else if (otherFiles.length && !srcFiles.length) scope = '配置/文档改动';
+  else scope = `纯源码改动（${srcFiles.length} 个文件）`;
+  return { changedFiles, changedFunctions, scope, srcFiles, testFiles, otherFiles };
 }
 
 // ---------- 2. 执行：在 worktree 真实跑测 ----------
@@ -136,12 +136,14 @@ function parseApiSmoke(out) {
   return results;
 }
 
-async function runInWorktree(targetRef) {
+async function runInWorktree(targetRef, testFiles) {
   const wt = path.join(os.tmpdir(), `aio-${Date.now()}`);
   await git(repoDir, 'worktree', 'add', '--detach', wt, targetRef);
   const sutInWt = path.join(wt, path.relative(ROOT, repoDir)); // worktree 含整个仓库树，SUT 在 wt/<相对路径>
-  const testFiles = globSync(path.join(sutInWt, 'tests', '*.test.js'));
-  const testOut = await run(sutInWt, 'node', ['--test', ...testFiles]);
+  // 把仓库内绝对测试路径映射到 worktree 内对应路径（精准选测的子集，或全量兜底）
+  const wtTestFiles = testFiles.map((f) => path.join(sutInWt, path.relative(repoDir, f)));
+  const runTests = wtTestFiles.length ? wtTestFiles : globSync(path.join(sutInWt, 'tests', '*.test.js'));
+  const testOut = await run(sutInWt, 'node', ['--test', ...runTests]);
   const smokeOut = await run(sutInWt, 'node', ['smoke/api-smoke.mjs']);
   await git(repoDir, 'worktree', 'remove', '--force', wt);
   return { unit: parseNodeTest(testOut.out), api: parseApiSmoke(smokeOut.out) };
@@ -162,14 +164,24 @@ async function main() {
   console.log(`   改动文件：${impact.changedFiles.join(', ') || '(无)'}`);
   console.log(`   改动函数：${impact.changedFunctions.join(', ') || '(无)'}`);
 
+  // 通用精准选测：导入图反向可达 + 同名兜底（不依赖业务语义）
+  const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
+  const sel = selectTests({ repoDir, gitRoot, changedFiles: impact.changedFiles });
+  impact.affectedTests = sel.testFiles.map((f) => path.relative(repoDir, f));
+  impact.narrowed = sel.narrowed;
+  impact.selectionReason = sel.reason;
+  console.log(`   ${sel.narrowed ? '🎯 精准选测' : '⚠️ 全量回退'}：${sel.reason}`);
+
   console.log('🧪 执行验证（worktree 真实跑测）…');
-  const { unit, api } = await runInWorktree(target);
+  const { unit, api } = await runInWorktree(target, sel.testFiles);
   const results = [...unit, ...api];
 
   const plan = [
-    { step: `读 git diff ${base}..${target}`, why: '定位改动文件/函数，判断影响面' },
-    { step: '跑单测 node --test', why: impact.changedFiles.length ? `直接覆盖改动模块(${impact.changedFiles.join(',')})` : '回归核心逻辑' },
-    { step: '跑 API 冒烟', why: '端到端验证下单/优惠/库存链路（前端体验）' },
+    { step: `读 git diff ${base}..${target}`, why: '定位改动文件，判断影响面' },
+    sel.narrowed
+      ? { step: `仅跑受影响测试（${sel.testFiles.length} 个）`, why: sel.reason }
+      : { step: '跑全量单测 node --test', why: sel.reason },
+    { step: '跑 API 冒烟', why: '端到端验证核心链路（前端体验）' },
   ];
 
   const report = {

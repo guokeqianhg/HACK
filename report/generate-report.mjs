@@ -83,9 +83,10 @@ const html = `<!DOCTYPE html>
 
   <div class="card">
     <h2>影响面分析</h2>
-    <div>${(impact.changedFiles || []).map((f) => `<span class="tag">${f}</span>`).join('')}</div>
-    <p><b>风险：</b>${impact.risk || '-'}</p>
-    <p><b>可能受影响：</b>${(impact.affectedScenarios || []).map((s) => `<span class="tag">${s}</span>`).join('') || '-'}</p>
+    <div><b>改动文件：</b>${(impact.changedFiles || []).map((f) => `<span class="tag">${f}</span>`).join('') || '-'}</div>
+    <p><b>改动范围：</b>${impact.scope || '-'}</p>
+    <p><b>选测策略：</b>${impact.narrowed ? '🎯 精准选测' : '⚠️ 全量回退'} — ${impact.selectionReason || '-'}</p>
+    <p><b>关联测试文件：</b>${(impact.affectedTests || []).map((f) => `<span class="tag">${f}</span>`).join('') || '-'}</p>
   </div>
 
   <div class="card">
