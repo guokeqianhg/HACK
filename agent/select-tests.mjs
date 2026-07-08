@@ -31,7 +31,7 @@ export function isSourceFile(p) {
   return SOURCE_RE.test(p) && !TEST_RE.test(p);
 }
 
-function stemOf(p) {
+export function stemOf(p) {
   let b = path.basename(p).replace(/\.[mc]?js$/, '');
   return b.replace(/\.(test|spec)$/, '');
 }
@@ -93,6 +93,14 @@ function reverseReachableTests(repoDir, targetAbs) {
     }
   }
   return reached;
+}
+
+// 需求/缺陷 → 测试覆盖度 用的「模块直接对应测试」：
+// 返回与 moduleRel 同干（stem）的可运行测试文件（如 src/coupon.js ↔ tests/coupon.test.js）。
+// 仅用同干匹配（不做传递反查），避免把「被其它模块 bug 牵连失败的测试」误算进本模块的覆盖度。
+export function testsForModule(repoDir, moduleRel) {
+  const modStem = stemOf(moduleRel);
+  return allJsFiles(repoDir).filter(isRunnableTest).filter((t) => stemOf(t) === modStem);
 }
 
 // 全局影响文件：改动它们应回退全量（通用基础设施感知，非业务硬编码）

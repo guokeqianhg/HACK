@@ -1,0 +1,288 @@
+{
+  "meta": {
+    "title": "AI 测试官报告",
+    "repo": "sample-app",
+    "scenario": "B",
+    "triggeredBy": "Demo · 场景B 需求驱动",
+    "generatedAt": "2026-07-08T10:31:46.084Z"
+  },
+  "impact": {
+    "changedFiles": [
+      "sample-app\\src\\coupon.js",
+      "sample-app\\src\\inventory.js",
+      "sample-app\\src\\order.js"
+    ],
+    "changedFunctions": [],
+    "scope": "需求驱动（场景 B）：优惠券叠加计算与下单库存校验",
+    "requirement": {
+      "id": "TAPD-100123",
+      "title": "优惠券叠加计算与下单库存校验",
+      "source": "TAPD 需求（离线演示 fixtures，结构通用：id/title/affectedModules/points）"
+    },
+    "srcFiles": [
+      "sample-app\\src\\coupon.js",
+      "sample-app\\src\\inventory.js",
+      "sample-app\\src\\order.js"
+    ],
+    "testFiles": [],
+    "otherFiles": [],
+    "affectedTests": [
+      "tests\\coupon.test.js",
+      "tests\\order.test.js",
+      "tests\\inventory.test.js"
+    ],
+    "narrowed": true,
+    "selectionReason": "按导入图/同名关联出 3/4 个测试文件"
+  },
+  "plan": [
+    {
+      "step": "读需求文档 TAPD-100123",
+      "why": "拆解测试点，明确应验证的能力"
+    },
+    {
+      "step": "关联代码模块（3 个）",
+      "why": "把需求点映射到实现源码"
+    },
+    {
+      "step": "仅跑受影响测试（3 个）",
+      "why": "按导入图/同名关联出 3/4 个测试文件"
+    },
+    {
+      "step": "跑 API 冒烟",
+      "why": "端到端验证核心链路（前端体验）"
+    },
+    {
+      "step": "产出需求覆盖度报告",
+      "why": "已覆盖 0 / 缺口 0 / 不达标 6"
+    }
+  ],
+  "results": [
+    {
+      "name": "小计 = 单价 × 数量",
+      "type": "unit",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "-",
+      "repro": "node --test"
+    },
+    {
+      "name": "满减券：满足门槛才生效",
+      "type": "unit",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "-",
+      "repro": "node --test"
+    },
+    {
+      "name": "满减券：不满门槛被拒绝",
+      "type": "unit",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "-",
+      "repro": "node --test"
+    },
+    {
+      "name": "折扣券：9 折应付 90%",
+      "type": "unit",
+      "status": "fail",
+      "severity": "high",
+      "rootCause": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 1000 !== 9000 (tests/coupon.test.js)",
+      "repro": "node --test",
+      "testFile": "coupon.test.js"
+    },
+    {
+      "name": "叠加：满减 + 无门槛 + 折扣",
+      "type": "unit",
+      "status": "fail",
+      "severity": "high",
+      "rootCause": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 1600 !== 14400 (tests/coupon.test.js)",
+      "repro": "node --test",
+      "testFile": "coupon.test.js"
+    },
+    {
+      "name": "价格不为负",
+      "type": "unit",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "-",
+      "repro": "node --test"
+    },
+    {
+      "name": "扣减成功返回剩余库存",
+      "type": "unit",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "-",
+      "repro": "node --test"
+    },
+    {
+      "name": "库存不足被拒绝",
+      "type": "unit",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "-",
+      "repro": "node --test"
+    },
+    {
+      "name": "释放可回补库存",
+      "type": "unit",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "-",
+      "repro": "node --test"
+    },
+    {
+      "name": "正常下单：返回订单号与优惠后金额",
+      "type": "unit",
+      "status": "fail",
+      "severity": "high",
+      "rootCause": "AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: 1000 !== 9000 (tests/order.test.js)",
+      "repro": "node --test",
+      "testFile": "order.test.js"
+    },
+    {
+      "name": "库存不足下单失败并回滚库存",
+      "type": "unit",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "-",
+      "repro": "node --test"
+    },
+    {
+      "name": "商品列表返回 3 个商品",
+      "type": "api",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "-",
+      "repro": "node smoke/api-smoke.mjs"
+    },
+    {
+      "name": "下单成功",
+      "type": "api",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "-",
+      "repro": "node smoke/api-smoke.mjs"
+    },
+    {
+      "name": "9 折后应付 26910 分(¥269.10)",
+      "type": "api",
+      "status": "fail",
+      "severity": "high",
+      "rootCause": "9 折后应付 26910 分(¥269.10)",
+      "repro": "node smoke/api-smoke.mjs"
+    },
+    {
+      "name": "库存已扣减至 9",
+      "type": "api",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "库存已扣减至 9",
+      "repro": "node smoke/api-smoke.mjs"
+    },
+    {
+      "name": "库存不足被拒绝(INVENTORY)",
+      "type": "api",
+      "status": "pass",
+      "severity": "-",
+      "rootCause": "库存不足被拒绝(INVENTORY)",
+      "repro": "node smoke/api-smoke.mjs"
+    }
+  ],
+  "coverage": [
+    {
+      "id": "P1",
+      "desc": "满减券：订单达门槛立减固定金额，未达门槛则不生效",
+      "module": "src/coupon.js",
+      "status": "fail",
+      "tests": [
+        "coupon.test.js",
+        "order.test.js"
+      ]
+    },
+    {
+      "id": "P2",
+      "desc": "无门槛立减券：直接立减固定金额",
+      "module": "src/coupon.js",
+      "status": "fail",
+      "tests": [
+        "coupon.test.js",
+        "order.test.js"
+      ]
+    },
+    {
+      "id": "P3",
+      "desc": "折扣券：在前面减完后按比例减价（如 9 折 = 减 10%）",
+      "module": "src/coupon.js",
+      "status": "fail",
+      "tests": [
+        "coupon.test.js",
+        "order.test.js"
+      ]
+    },
+    {
+      "id": "P4",
+      "desc": "最终应付金额不低于 0（价格不为负）",
+      "module": "src/coupon.js",
+      "status": "fail",
+      "tests": [
+        "coupon.test.js",
+        "order.test.js"
+      ]
+    },
+    {
+      "id": "P5",
+      "desc": "库存不足时下单失败并回滚已扣库存",
+      "module": "src/inventory.js",
+      "status": "fail",
+      "tests": [
+        "inventory.test.js",
+        "order.test.js"
+      ]
+    },
+    {
+      "id": "P6",
+      "desc": "下单成功返回订单号、原价、应付金额与优惠明细",
+      "module": "src/order.js",
+      "status": "fail",
+      "tests": [
+        "order.test.js"
+      ]
+    }
+  ],
+  "process": [
+    {
+      "title": "① 读需求/缺陷",
+      "detail": "TAPD-100123 · 优惠券叠加计算与下单库存校验",
+      "status": "done"
+    },
+    {
+      "title": "② 拆解测试点",
+      "detail": "6 个测试点 / 命中 3 个模块",
+      "status": "done"
+    },
+    {
+      "title": "③ 选测策略",
+      "detail": "🎯 精准选测 3 个",
+      "status": "done"
+    },
+    {
+      "title": "④ 执行验证",
+      "detail": "通过 12 / 失败 4",
+      "status": "warn"
+    },
+    {
+      "title": "⑤ 生成可决策报告",
+      "detail": "report/index.html",
+      "status": "done"
+    }
+  ],
+  "summary": {
+    "total": 16,
+    "pass": 12,
+    "fail": 4,
+    "blocking": [
+      "存在失败用例，须修复并复测通过后方可合入/发布"
+    ]
+  }
+}

@@ -15,7 +15,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { globSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { selectTests, isSourceFile, isTestFile } from './select-tests.mjs';
+import { selectTests, isSourceFile, isTestFile, testsForModule } from './select-tests.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -96,7 +96,7 @@ function parseNodeTest(out) {
       lastFailName = name;
       if (!seen.has(name)) {
         seen.add(name);
-        const r = { name, type: 'unit', status: 'fail', severity: 'high', rootCause: '', repro: 'node --test' };
+        const r = { name, type: 'unit', status: 'fail', severity: 'high', rootCause: '', repro: 'node --test', testFile: '' };
         failByName.set(name, r);
         results.push(r);
       }
@@ -107,6 +107,7 @@ function parseNodeTest(out) {
       } else if (/tests[\\/][\w.-]+\.test\.js/.test(line)) {
         const f = line.match(/tests[\\/][\w.-]+\.test\.js/)[0];
         if (!r.rootCause.includes(f)) r.rootCause += `(${f})`;
+        if (!r.testFile) r.testFile = f.split(/[\\/]/).pop();
         lastFailName = null;
       }
     }
@@ -157,7 +158,110 @@ function summarize(results) {
   return { total: results.length, pass, fail, blocking };
 }
 
+// 场景 B：读需求/缺陷 fixture（离线版 TAPD），结构通用：
+//   { id, title, source, affectedModules:[相对 repoDir 的源码路径], points:[{id,desc,module}] }
+function readRequirement(p) {
+  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  if (!raw.points || !Array.isArray(raw.points)) throw new Error('需求 fixture 缺少 points 数组');
+  return raw;
+}
+
+// 场景 B：把需求点映射到测试执行结果，产出「需求覆盖度」
+//   status: pass（有测试且全过）/ fail（该模块直接对应测试有失败）/ gap（无对应测试 → 测试缺口）
+function computeCoverage(req, results, repoDir) {
+  const failingFiles = new Set(results.filter((r) => r.status === 'fail' && r.testFile).map((r) => r.testFile));
+  return req.points.map((pt) => {
+    const tFiles = testsForModule(repoDir, pt.module).map((f) => path.basename(f));
+    let status;
+    if (tFiles.length === 0) status = 'gap';
+    else if (tFiles.some((t) => failingFiles.has(t))) status = 'fail';
+    else status = 'pass';
+    return { id: pt.id, desc: pt.desc, module: pt.module, status, tests: tFiles };
+  });
+}
+
+// 统一生成「AI 测试官过程时间线」，供 HTML 可视化（不依赖业务语义）
+function buildProcess({ scenario, req, impact, sel, summary }) {
+  const phases = [];
+  if (scenario === 'B') {
+    phases.push({ title: '① 读需求/缺陷', detail: `${req.id} · ${req.title}`, status: 'done' });
+    phases.push({ title: '② 拆解测试点', detail: `${req.points.length} 个测试点 / 命中 ${impact.srcFiles.length} 个模块`, status: 'done' });
+  } else {
+    phases.push({ title: '① 理解变更', detail: `git diff ${base}..${target}`, status: 'done' });
+    phases.push({ title: '② 影响面分析', detail: impact.changedFiles.join(', ') || '（无改动）', status: 'done' });
+  }
+  phases.push({
+    title: '③ 选测策略',
+    detail: sel.narrowed ? `🎯 精准选测 ${sel.testFiles.length} 个` : `⚠️ 全量回退 ${sel.testFiles.length} 个`,
+    status: 'done',
+  });
+  phases.push({
+    title: '④ 执行验证',
+    detail: `通过 ${summary.pass} / 失败 ${summary.fail}`,
+    status: summary.fail > 0 ? 'warn' : 'done',
+  });
+  phases.push({ title: '⑤ 生成可决策报告', detail: 'report/index.html', status: 'done' });
+  return phases;
+}
+
 async function main() {
+  const outName = args.out || 'report';
+  const reportJsonPath = path.join(ROOT, 'report', `${outName}.json`);
+
+  // --- 场景 B：需求驱动（离线读取 fixture，复用通用选测引擎）---
+  if (scenario === 'B') {
+    const reqPath = args.requirement || path.join(repoDir, 'docs', 'requirement-demo.json');
+    const req = readRequirement(reqPath);
+    const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
+    const rel = path.relative(gitRoot, repoDir);
+    const changedFiles = req.affectedModules.map((m) => path.join(rel, m));
+    const impact = {
+      changedFiles,
+      changedFunctions: [],
+      scope: `需求驱动（场景 B）：${req.title}`,
+      requirement: { id: req.id, title: req.title, source: req.source },
+      srcFiles: changedFiles.filter(isSourceFile),
+      testFiles: [],
+      otherFiles: [],
+    };
+    const sel = selectTests({ repoDir, gitRoot, changedFiles });
+    impact.affectedTests = sel.testFiles.map((f) => path.relative(repoDir, f));
+    impact.narrowed = sel.narrowed;
+    impact.selectionReason = sel.reason;
+    console.log(`📋 场景 B · 需求 ${req.id}（${req.points.length} 测试点）→ 关联 ${sel.testFiles.length} 个测试`);
+
+    console.log('🧪 执行验证（worktree 真实跑测）…');
+    const { unit, api } = await runInWorktree(target, sel.testFiles);
+    const results = [...unit, ...api];
+    const coverage = computeCoverage(req, results, repoDir);
+    const covered = coverage.filter((c) => c.status === 'pass').length;
+    const gaps = coverage.filter((c) => c.status === 'gap').length;
+    const failingPts = coverage.filter((c) => c.status === 'fail').length;
+
+    const plan = [
+      { step: `读需求文档 ${req.id}`, why: '拆解测试点，明确应验证的能力' },
+      { step: `关联代码模块（${impact.srcFiles.length} 个）`, why: '把需求点映射到实现源码' },
+      sel.narrowed ? { step: `仅跑受影响测试（${sel.testFiles.length} 个）`, why: sel.reason } : { step: '跑全量单测', why: sel.reason },
+      { step: '跑 API 冒烟', why: '端到端验证核心链路（前端体验）' },
+      { step: '产出需求覆盖度报告', why: `已覆盖 ${covered} / 缺口 ${gaps} / 不达标 ${failingPts}` },
+    ];
+    const report = {
+      meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString() },
+      impact,
+      plan,
+      results,
+      coverage,
+      process: buildProcess({ scenario, req, impact, sel, summary: summarize(results) }),
+      summary: summarize(results),
+    };
+    fs.writeFileSync(reportJsonPath, JSON.stringify(report, null, 2), 'utf8');
+    console.log(`📝 已写 ${reportJsonPath}`);
+    await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
+    console.log(`\n✅ 场景 B 完成：覆盖 ${covered} / 缺口 ${gaps} / 不达标 ${failingPts}`);
+    return;
+  }
+
+  // --- 场景 A / C：代码改动驱动（或 base=target 全量回归）---
   console.log(`🔍 理解变更：${base}..${target}`);
   const diffText = await git(repoDir, 'diff', `${base}..${target}`);
   const impact = analyzeDiff(diffText);
@@ -189,14 +293,14 @@ async function main() {
     impact,
     plan,
     results,
+    process: buildProcess({ scenario, impact, sel, summary: summarize(results) }),
     summary: summarize(results),
   };
 
-  const reportJsonPath = path.join(ROOT, 'report', 'report.json');
   fs.writeFileSync(reportJsonPath, JSON.stringify(report, null, 2), 'utf8');
   console.log(`📝 已写 ${reportJsonPath}`);
 
-  await run(ROOT, 'node', ['report/generate-report.mjs']);
+  await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
   console.log(`\n✅ 完成：通过 ${report.summary.pass} / 失败 ${report.summary.fail}`);
 }
 

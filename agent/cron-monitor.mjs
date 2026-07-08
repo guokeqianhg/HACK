@@ -19,9 +19,6 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
-const REPORT_JSON = path.join(ROOT, 'report', 'report.json');
-const STATE_PATH = path.join(ROOT, 'report', '.monitor-state.json');
-const MSG_PATH = path.join(ROOT, 'report', '.monitor-last-message.md');
 
 const args = process.argv.slice(2).reduce((m, a, i, arr) => {
   if (a.startsWith('--')) m[a.slice(2)] = arr[i + 1];
@@ -32,7 +29,12 @@ const repo = args.repo || 'sample-app';
 const intervalSec = Number(args.interval || 0);
 const reAlertHours = Number(args.reAlert || 6);
 const webhook = args.webhook || process.env.WEBHOOK_URL || '';
+const outName = args.out || 'report';
 const once = !intervalSec;
+
+const REPORT_JSON = path.join(ROOT, 'report', `${outName}.json`);
+const STATE_PATH = path.join(ROOT, 'report', '.monitor-state.json');
+const MSG_PATH = path.join(ROOT, 'report', '.monitor-last-message.md');
 
 function run(cwd, cmd, cmdArgs) {
   return new Promise((res) => {
@@ -58,6 +60,7 @@ async function checkOnce() {
     '--base', branch,
     '--target', branch,
     '--scenario', 'C',
+    '--out', outName,
     '--triggeredBy', `场景C 定时巡检@${branch}`,
   ]);
   if (r.code !== 0) console.error('⚠️ 执行引擎非零退出：\n' + r.out.slice(-800));
