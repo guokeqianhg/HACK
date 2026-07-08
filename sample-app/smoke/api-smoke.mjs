@@ -46,4 +46,5 @@ check('库存不足被拒绝(INVENTORY)', o2.ok === false && o2.code === 'INVENT
 
 server.close();
 console.log(failures === 0 ? '\n✅ ALL SMOKE PASS' : `\n❌ ${failures} SMOKE FAILED`);
-process.exit(failures === 0 ? 0 : 1);
+// 用 exitCode 而非 process.exit，避免与 undici keep-alive socket 关闭竞争导致 libuv 断言
+process.exitCode = failures === 0 ? 0 : 1;
