@@ -58,17 +58,17 @@ if (args.help) {
   console.log(`AI 测试官 · 执行引擎（理解 diff → 规划 → 真实跑测 → 报告）
 用法：
   node agent/run-test-officer.mjs --repo <dir> --base <ref> --target <ref> --scenario <A|B|C>
-                                [--requirement <json>] [--diff <file>] [--out <name>] [--triggeredBy <text>]
+                                [--requirement <json|md>] [--diff <file>] [--out <name>] [--triggeredBy <text>]
 
 场景：
   A  代码改动驱动：git diff base..target（或 --diff 直接喂入 TGit/工蜂 MCP 取回的 MR diff）→ 精准选测 → 在目标分支真实跑测
-  B  需求驱动：读 requirement JSON（可由 TAPD MCP 取回后写出）→ 需求覆盖度报告（需 --requirement，默认 docs/requirement-demo.json）
+  B  需求驱动：读 requirement（JSON 或 Markdown，可由 TAPD MCP 取回后写出）→ 需求覆盖度报告（需 --requirement，默认 docs/requirement.md，回退 requirement-demo.json）
   C  持续巡检用：base==target 时为全量回归（实际由 cron-monitor 调用）
 
 示例：
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A --diff report/.mcp-diff.txt
-  node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --requirement sample-app/docs/requirement-demo.json`);
+  node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --requirement sample-app/docs/requirement.md`);
   process.exit(0);
 }
 
@@ -331,12 +331,82 @@ function summarize(results) {
   return { total: effective.length, pass, fail, blocking };
 }
 
-// 场景 B：读需求/缺陷 fixture（离线版 TAPD），结构通用：
-//   { id, title, source, affectedModules:[相对 repoDir 的源码路径], points:[{id,desc,module}] }
+// 场景 B：读需求/缺陷（离线版 TAPD / TAPD MCP 取回 / 手写 Markdown），结构通用：
+//   JSON: { id, title, source, affectedModules:[相对 repoDir 的源码路径], points:[{id,desc,module,tests?}] }
+//   MD  : 通用约定格式（见 parseMarkdownRequirement），引擎统一规约为上述结构
+// 不读取/匹配任何业务关键词，对任意 repo 与需求输入可复用（防过拟合）。
 function readRequirement(p) {
-  const raw = JSON.parse(readTextRobust(p));
-  if (!raw.points || !Array.isArray(raw.points)) throw new Error('需求 fixture 缺少 points 数组');
+  const isMd = /\.md$/i.test(p);
+  const raw = isMd ? parseMarkdownRequirement(readTextRobust(p)) : JSON.parse(readTextRobust(p));
+  if (!raw.points || !Array.isArray(raw.points) || !raw.points.length) {
+    throw new Error(`需求文件（${p}）未解析出任何测试点（points）`);
+  }
   return raw;
+}
+
+// 场景 B：从 Markdown 需求解析出覆盖度 fixture 结构。
+// 通用约定（对任意 repo 适用：仅用「模块路径 + 用例名子串」，不含业务语义）：
+//   # 需求标题
+//   需求ID: <id>
+//   ## 模块：src/xxx.js            ← 后续测试点归属的源码模块（相对 repoDir）
+//   ### 测试点 P1：描述
+//   关联用例：用例名子串1, 用例名子串2   ← 可选，做 per-point 精确核对
+// 兜底：若全文无「测试点」结构化块，则按「## 小节」生成测试点（模块未知，仅做存在性展示）。
+function parseMarkdownRequirement(md) {
+  // 归一化：去 BOM/回车（CRLF 会让 '$' 整行匹配失效）、全角冒号→半角、全角空格→普通空格，
+  // 避免不同编辑器/平台写入差异导致解析失败
+  const norm = (s) => s.replace(/^﻿/, '').replace(/\r/g, '').replace(/：/g, ':').replace(/；/g, ';').replace(/　/g, ' ');
+  const lines = md.split('\n').map(norm).filter((l) => l.length);
+  let id = 'REQ-MD';
+  let title = '';
+  const moduleSet = new Set();
+  const affectedModules = [];
+  const pushModule = (m) => { if (m && !moduleSet.has(m)) { moduleSet.add(m); affectedModules.push(m); } };
+  // 全文档扫描路径线索（模块行 / 反引号 / 普通路径），作为受影响模块
+  for (const l of lines) {
+    for (const m of l.matchAll(/(?:^|[\s`(])((?:src\/)?[\w.\/-]+\.(?:js|ts|tsx|jsx))/g)) pushModule(m[1]);
+  }
+
+  const points = [];
+  let curModule = '';
+  let seq = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const h1 = line.match(/^#\s+(.*)$/);
+    if (h1) { if (!title) title = h1[1].trim(); continue; }
+    // id：兼容「需求ID / 需求编号 / ID / Requirement」+ 冒号（已归一化为半角）
+    const idLine = line.match(/^(?:需求\s*ID|需求编号|ID|Requirement)\s*[:：]\s*(\S+)/i);
+    if (idLine) { id = idLine[1].trim(); continue; }
+    // 模块行：## 后跟一个源码路径（兼容「模块：」前缀或无前缀）
+    const modLine = line.match(/^##\s*(?:模块\s*[:：]\s*)?((?:src\/)?[\w.\/-]+\.(?:js|ts|tsx|jsx))\s*$/i);
+    if (modLine) { curModule = modLine[1].trim(); pushModule(curModule); continue; }
+    // 测试点：### 后含「测试点」+ 编号（如 P1）；编号用 [^\s：:] 避免整段中文被吞
+    const pt = line.match(/^###\s*测试点\s+([^\s：:]+)\s*[:：]?\s*(.*)$/);
+    if (pt) {
+      const pid = pt[1].trim() || `P${++seq}`;
+      let desc = pt[2].trim();
+      const tests = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        const tl = lines[j];
+        if (/^#{1,3}\s/.test(tl)) break; // 遇到下个标题即停止收集
+        const tm = tl.match(/关联\s*用例\s*[:：]\s*(.+)/);
+        if (tm) tm[1].split(/[，,、\s]+/).map((s) => s.trim()).filter(Boolean).forEach((t) => tests.push(t));
+      }
+      if (!desc && tests.length === 0 && lines[i + 1]) desc = lines[i + 1].trim();
+      points.push({ id: pid, desc: desc || pid, module: curModule, tests });
+      continue;
+    }
+  }
+
+  // 兜底：无任何结构化「测试点」时，按 ## 小节标题生成点（模块未知）
+  if (points.length === 0) {
+    for (const l of lines) {
+      const h = l.match(/^##\s+(.+)$/);
+      if (h) points.push({ id: `P${++seq}`, desc: h[1].trim(), module: '', tests: [] });
+    }
+  }
+  if (!points.length) throw new Error('Markdown 需求未解析出任何测试点');
+  return { id, title: title || id, source: 'Markdown', affectedModules, points };
 }
 
 // 场景 B：通用「实现核对」探针 —— 仅基于模块结构判断需求点是否真的有代码落地，
@@ -449,7 +519,9 @@ async function main() {
 
   // --- 场景 B：需求驱动（离线读取 fixture，复用通用选测引擎）---
   if (scenario === 'B') {
-    const reqPath = args.requirement || path.join(repoDir, 'docs', 'requirement-demo.json');
+    // 默认优先用 Markdown 需求（docs/requirement.md），不存在则回退 JSON fixture
+    const defMd = path.join(repoDir, 'docs', 'requirement.md');
+    const reqPath = args.requirement || (fs.existsSync(defMd) ? defMd : path.join(repoDir, 'docs', 'requirement-demo.json'));
     const req = readRequirement(reqPath);
     const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
     const rel = path.relative(gitRoot, repoDir);

@@ -53,8 +53,8 @@ async function main() {
   console.log('▶ 场景 A：代码改动 → 针对性测试（feature/coupon-bug）');
   await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'feature/coupon-bug', '--scenario', 'A', '--out', 'report-A', '--triggeredBy', 'Demo · 场景A 代码改动']);
 
-  console.log('\n▶ 场景 B：需求文档 → 覆盖度报告（TAPD-100123 离线 fixture）');
-  await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'feature/coupon-bug', '--scenario', 'B', '--requirement', 'sample-app/docs/requirement-demo.json', '--out', 'report-B', '--triggeredBy', 'Demo · 场景B 需求驱动']);
+  console.log('\n▶ 场景 B：需求文档（Markdown requirement.md）→ 覆盖度报告');
+  await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'feature/coupon-bug', '--scenario', 'B', '--requirement', 'sample-app/docs/requirement.md', '--out', 'report-B', '--triggeredBy', 'Demo · 场景B 需求驱动']);
 
   console.log('\n▶ 场景 C：定时巡检（健康基线 @main）');
   await runNode(['agent/cron-monitor.mjs', '--branch', 'main', '--out', 'report-C-healthy', '--triggeredBy', 'Demo · 场景C 巡检']);

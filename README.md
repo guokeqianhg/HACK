@@ -103,7 +103,8 @@ node agent/demo.mjs
 # 场景 A：diff 驱动精准选测
 node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
 # 场景 B：需求驱动覆盖度（离线 fixture 模拟 TAPD 需求）
-node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario B --requirement sample-app/docs/requirement-demo.json
+node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario B --requirement sample-app/docs/requirement.md
+# 需求可为 Markdown（docs/requirement.md，通用约定格式）或 JSON（requirement-demo.json）；TAPD MCP 取回后写出同结构亦可
 # 场景 C：定时巡检（同 P4，见上）
 node agent/cron-monitor.mjs --branch main
 ```

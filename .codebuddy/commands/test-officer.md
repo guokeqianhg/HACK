@@ -26,11 +26,11 @@ description: AI 测试官 - 全链路自动化测试（理解变更→规划→�
 3. 汇报结论：通过/失败数、严重级、失败根因与复现。
 
 ### 场景 B（需求 → 覆盖度验证）
-1. **真实调用 tapd MCP** 取需求/缺陷（如 `mcp__tapd__get_story`），整理为覆盖度 fixture 结构：
-   `{ "id": "<需求ID>", "title": "...", "source": "TAPD", "affectedModules": ["src/xxx.js"], "points": [{"id":"P1","desc":"...","module":"src/xxx.js","tests":["用例名子串"]}] }`
-   写入 `report/.mcp-req.json`。
+1. **真实调用 tapd MCP** 取需求/缺陷（如 `mcp__tapd__get_story`），整理为覆盖度结构（**JSON 或 Markdown 约定格式**均可，引擎都支持）写入 `report/.mcp-req.md`（或 `.json`）：
+   - Markdown 约定：`需求ID: <id>` + `## 模块：src/xxx.js` + `### 测试点 P1：描述`（可选 `关联用例：用例名子串`）。
+   - 本地验证也可直接喂已存在的 `docs/requirement.md`（即此约定格式）。
 2. 运行：
-   `node agent/run-test-officer.mjs --repo sample-app --scenario B --requirement report/.mcp-req.json --target main`
+   `node agent/run-test-officer.mjs --repo sample-app --scenario B --requirement report/.mcp-req.md --target main`
    引擎产出需求覆盖度报告（已实现 / 未实现 / 未测试 / 疑似桩 / 不达标）。
 3. 汇报覆盖度、缺口与高风险点。
 
