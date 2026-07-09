@@ -116,8 +116,8 @@ node agent/cron-monitor.mjs --branch main
 - **执行结果表**：用例 / 类型（unit/api/ui）/ 状态 / 严重级 / 根因 / 复现；前端 UI 未装 Playwright 时显示 `⏭ SKIP` 不计入通过率。
 
 ## 平台能力（Box/CodeBuddy）
-- **TGit/工蜂 MCP**：读 PR/MR diff（场景 A）
-- **TAPD MCP**：读需求/缺陷/用例（场景 B/C）
-- **Playwright MCP**：驱动真实浏览器（前端体验）
-- **automation 定时任务 + 企微 webhook**：场景 C 持续巡检与异常推送（见上）
-- 离线兜底：本地 git + 本地测试 + 本地 HTML 报告，确保评审现场真实可跑。
+- **TGit/工蜂 MCP（已接入 `/test-officer`）**：场景 A 真实调用 `get_merge_request_diff` 取 PR/MR diff → 写 `report/.mcp-diff.txt` → `run-test-officer.mjs --diff` 喂入，闭环跑测。
+- **TAPD MCP（已接入 `/test-officer`）**：场景 B 真实调用 `get_story`/`get_bug` 取需求/缺陷 → 整理为 fixture 写 `report/.mcp-req.json` → `run-test-officer.mjs --requirement` 喂入，产出覆盖度报告。
+- **Playwright MCP**：驱动真实浏览器（前端体验）；或沿用引擎内置的 `@playwright/test` UI 冒烟。
+- **automation 定时任务 + 企微/Knot webhook**：场景 C 持续巡检与异常推送（见上）。
+- 离线兜底：MCP 不可用时，全部回退本地 `git diff` / 本地 `docs/requirement-demo.json` / 本地 HTML 报告，全链路仍成立。

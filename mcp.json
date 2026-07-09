@@ -1,13 +1,13 @@
 {
   "mcpServers": {
     "gongfeng": {
-      "description": "工蜂(TGit) MCP：读取 PR/MR diff、提交、文件，用于场景 A 理解代码改动",
+      "description": "工蜂(TGit) MCP：读取 PR/MR diff（如 get_merge_request_diff），用于场景 A 理解代码改动；取回的 diff 写入 report/.mcp-diff.txt 后经 run-test-officer.mjs --diff 喂入",
       "command": "npx",
       "args": ["-y", "@tencent/tgit-mcp-server"],
       "env": { "TGG_TOKEN": "${TGIT_TOKEN}" }
     },
     "tapd": {
-      "description": "TAPD MCP：读取需求/缺陷/用例，用于场景 B/C 关联与需求拆解",
+      "description": "TAPD MCP：读取需求/缺陷/用例（如 get_story/get_bug），用于场景 B/C 关联与需求拆解；取回内容整理为 fixture JSON 写 report/.mcp-req.json 后经 run-test-officer.mjs --requirement 喂入",
       "command": "npx",
       "args": ["-y", "@tencent/tapd-mcp-server"],
       "env": { "TAPD_API_USER": "${TAPD_API_USER}", "TAPD_API_PASSWORD": "${TAPD_API_PASSWORD}" }

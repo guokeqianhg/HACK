@@ -6,9 +6,14 @@
 //   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
 //
 // 机制：
-//   1. 理解：git diff base..target，提取改动文件/函数/风险
-//   2. 执行：用 git worktree 在 target 代码上真实运行单测 + API 冒烟（不污染当前分支）
+//   1. 理解：git diff base..target（或 --diff 直接喂入「TGit/工蜂 MCP 取回的 MR diff」），提取改动文件/函数/风险
+//   2. 执行：用 git worktree 在 target 代码上真实运行单测 + API 冒烟 + 前端 UI 冒烟（不污染当前分支）
 //   3. 报告：解析真实输出 → 写 report/report.json → 调 generate-report.mjs 渲染 HTML 看板
+//
+// MCP 接入（让平台能力从「装饰」变「可用」）：
+//   - 场景 A：TGit/工蜂 MCP 取 MR/PR diff → 写入文件 → --diff <file> 直接喂入，避免重复 git 计算，也支持跨仓库远程 diff
+//   - 场景 B：TAPD MCP 取需求/缺陷 → 整理为 fixture JSON → --requirement <file> 注入
+//   （MCP 工具由驱动本 Agent 的 LLM 宿主调用；本脚本负责接收「MCP 取回的内容」并执行闭环）
 
 import { spawn } from 'node:child_process';
 import os from 'node:os';
@@ -21,6 +26,22 @@ import { selectTests, isSourceFile, isTestFile, testsForModule } from './select-
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
+
+// 鲁棒读取文本文件：兼容 UTF-8 / UTF-16LE（含或不含 BOM），避免 LLM/工具写出的文件因编码差异导致解析失败
+function readTextRobust(p) {
+  const buf = fs.readFileSync(p);
+  let s;
+  if (buf.length >= 2 && buf[0] === 0xfe && buf[1] === 0xff) {
+    s = buf.swap16().toString('utf16le'); // UTF-16 BE（罕见）
+  } else if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) {
+    s = buf.toString('utf16le', 2); // UTF-16 LE（跳过 BOM）
+  } else if (buf.length >= 4 && buf[1] === 0x00 && buf[3] === 0x00 && buf[0] !== 0x00) {
+    s = buf.toString('utf16le'); // 无 BOM 的 UTF-16LE（ASCII 占偶数字节）
+  } else {
+    s = buf.toString('utf8');
+  }
+  return s.replace(/^﻿/, '');
+}
 
 // ---------- 参数 ----------
 const args = process.argv.slice(2).reduce((m, a, i, arr) => {
@@ -37,15 +58,16 @@ if (args.help) {
   console.log(`AI 测试官 · 执行引擎（理解 diff → 规划 → 真实跑测 → 报告）
 用法：
   node agent/run-test-officer.mjs --repo <dir> --base <ref> --target <ref> --scenario <A|B|C>
-                                [--requirement <json>] [--out <name>] [--triggeredBy <text>]
+                                [--requirement <json>] [--diff <file>] [--out <name>] [--triggeredBy <text>]
 
 场景：
-  A  代码改动驱动：git diff base..target → 精准选测 → 在目标分支真实跑测
-  B  需求驱动：读 requirement JSON → 需求覆盖度报告（需 --requirement，默认 docs/requirement-demo.json）
+  A  代码改动驱动：git diff base..target（或 --diff 直接喂入 TGit/工蜂 MCP 取回的 MR diff）→ 精准选测 → 在目标分支真实跑测
+  B  需求驱动：读 requirement JSON（可由 TAPD MCP 取回后写出）→ 需求覆盖度报告（需 --requirement，默认 docs/requirement-demo.json）
   C  持续巡检用：base==target 时为全量回归（实际由 cron-monitor 调用）
 
 示例：
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
+  node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A --diff report/.mcp-diff.txt
   node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --requirement sample-app/docs/requirement-demo.json`);
   process.exit(0);
 }
@@ -55,6 +77,8 @@ const base = args.base || 'main';
 const target = args.target || 'HEAD';
 const scenario = args.scenario || 'A';
 const triggeredBy = args.triggeredBy || `分支 ${target} 对比 ${base}`;
+// MCP 注入口：场景 A 可由 TGit/工蜂 MCP 取回 MR diff 后通过 --diff 直接喂入
+const diffFile = args.diff || '';
 
 if (!['A', 'B', 'C'].includes(scenario)) {
   console.error(`❌ 非法 --scenario "${scenario}"，仅支持 A / B / C（用 --help 查看用法）`);
@@ -73,7 +97,9 @@ function git(cwd, ...argv) {
 }
 
 function analyzeDiff(diffText) {
-  const changedFiles = [...diffText.matchAll(/^diff --git a\/(.+?) b\//gm)].map((m) => m[1]);
+  // 防御：MCP/外部取回的 diff 可能带 UTF-8 BOM，会破坏首行 ^diff 匹配，先剥掉
+  const text = String(diffText).replace(/^﻿/, '');
+  const changedFiles = [...text.matchAll(/^diff --git a\/(.+?) b\//gm)].map((m) => m[1]);
   const changedFunctions = [
     ...new Set(
       [...diffText.matchAll(/@@[^\n]*@@\s*(.+?)\s*$/gm)].map((m) => m[1].trim()).filter(Boolean),
@@ -308,7 +334,7 @@ function summarize(results) {
 // 场景 B：读需求/缺陷 fixture（离线版 TAPD），结构通用：
 //   { id, title, source, affectedModules:[相对 repoDir 的源码路径], points:[{id,desc,module}] }
 function readRequirement(p) {
-  const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
+  const raw = JSON.parse(readTextRobust(p));
   if (!raw.points || !Array.isArray(raw.points)) throw new Error('需求 fixture 缺少 points 数组');
   return raw;
 }
@@ -400,7 +426,7 @@ function buildProcess({ scenario, req, impact, sel, summary }) {
     phases.push({ title: '① 读需求/缺陷', detail: `${req.id} · ${req.title}`, status: 'done' });
     phases.push({ title: '② 拆解测试点', detail: `${req.points.length} 个测试点 / 命中 ${impact.srcFiles.length} 个模块`, status: 'done' });
   } else {
-    phases.push({ title: '① 理解变更', detail: `git diff ${base}..${target}`, status: 'done' });
+    phases.push({ title: '① 理解变更', detail: impact.diffSource || `git diff ${base}..${target}`, status: 'done' });
     phases.push({ title: '② 影响面分析', detail: impact.changedFiles.join(', ') || '（无改动）', status: 'done' });
   }
   phases.push({
@@ -475,9 +501,12 @@ async function main() {
   }
 
   // --- 场景 A / C：代码改动驱动（或 base=target 全量回归）---
-  console.log(`🔍 理解变更：${base}..${target}`);
-  const diffText = await git(repoDir, 'diff', `${base}..${target}`);
+  const diffText = diffFile
+    ? readTextRobust(path.resolve(ROOT, diffFile))
+    : await git(repoDir, 'diff', `${base}..${target}`);
+  console.log(`🔍 理解变更：${diffFile ? `(来自外部 diff 文件 ${diffFile})` : `${base}..${target}`}`);
   const impact = analyzeDiff(diffText);
+  impact.diffSource = diffFile ? `MCP/外部 diff 文件：${diffFile}` : `git diff ${base}..${target}`;
   console.log(`   改动文件：${impact.changedFiles.join(', ') || '(无)'}`);
   console.log(`   改动函数：${impact.changedFunctions.join(', ') || '(无)'}`);
 
