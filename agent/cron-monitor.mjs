@@ -21,16 +21,40 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
 
 const args = process.argv.slice(2).reduce((m, a, i, arr) => {
-  if (a.startsWith('--')) m[a.slice(2)] = arr[i + 1];
+  if (a.startsWith('--')) {
+    const k = a.slice(2);
+    const v = arr[i + 1];
+    m[k] = v === undefined || v.startsWith('--') ? true : v;
+  }
   return m;
 }, {});
+
+if (args.help) {
+  console.log(`AI 测试官 · 场景 C 持续巡检 + 企微推送
+用法：
+  node agent/cron-monitor.mjs --branch <ref> [--repo <dir>] [--interval <秒>] [--reAlert <小时>]
+                                [--out <name>] [--webhook <url>] [--once] [--help]
+
+说明：
+  --branch    巡检目标分支（默认 main）
+  --interval  自循环间隔秒；省略则一次性（--once）
+  --reAlert   异常持续超过该小时数未推送则重推（默认 6）
+  --webhook   企微机器人地址；省略则 dry-run 落盘 report/.monitor-last-message.md
+  --out       报告文件名前缀（默认 report），写 report/<out>.json
+
+示例：
+  node agent/cron-monitor.mjs --branch main
+  node agent/cron-monitor.mjs --branch feature/coupon-bug --out report-C-alert
+  node agent/cron-monitor.mjs --branch main --interval 3600`);
+  process.exit(0);
+}
 const branch = args.branch || 'main';
 const repo = args.repo || 'sample-app';
 const intervalSec = Number(args.interval || 0);
 const reAlertHours = Number(args.reAlert || 6);
 const webhook = args.webhook || process.env.WEBHOOK_URL || '';
 const outName = args.out || 'report';
-const once = !intervalSec;
+const once = args.once === true || !intervalSec;
 
 const REPORT_JSON = path.join(ROOT, 'report', `${outName}.json`);
 const STATE_PATH = path.join(ROOT, 'report', '.monitor-state.json');

@@ -50,7 +50,7 @@ cd sample-app
 git diff main feature/coupon-bug   # 查看改动（单文件：折扣券 9 折算成 1 折）
 ```
 真实可跑：AI 测试官读取 diff → 影响分析 → 运行 `node --test` 与 `node smoke/api-smoke.mjs` → 生成含严重级别/根因/复现的报告。
-（在 `main` 上跑结果为 18 通过 / 0 失败；在 `feature/coupon-bug` 上为 14 通过 / 4 失败，暴露资损 bug。）
+（全量回归口径：在 `main` 上为 18 通过 / 0 失败；在 `feature/coupon-bug` 上为 14 通过 / 4 失败，暴露资损 bug。注意：场景 A/B 走「精准选测」只跑受影响测试，故 demo 产物为 9 通过 / 4 失败（A）与 12 通过 / 4 失败（B）——三种口径失败项同源，均来自同一折扣 bug。）
 
 ## 演示「持续巡检 + 异常推送」(场景 C)
 场景 C 不依赖代码改动，而是**定时对目标分支做全量回归**，发现失败用例时通过企微机器人 webhook 推送告警，并用状态文件去重避免刷屏。

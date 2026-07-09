@@ -67,8 +67,9 @@ function importsOf(file) {
   return deps;
 }
 
-// 在被测目录内构建导入图，并求「能传递依赖 target 的所有文件」
-function reverseReachableTests(repoDir, targetAbs) {
+// 在被测目录内构建导入图（一次），返回反向索引 rev：rev.get(文件) = 所有（传递）依赖它的文件
+// 整个 selectTests 只调用一次，避免对每个改动源文件重复扫描全仓库（O(n·m) → O(n+m)）
+function buildImportGraph(repoDir) {
   const files = allJsFiles(repoDir);
   const graph = new Map();
   for (const f of files) graph.set(f, new Set(importsOf(f)));
@@ -80,6 +81,11 @@ function reverseReachableTests(repoDir, targetAbs) {
       rev.get(d).add(f);
     }
   }
+  return { files, rev };
+}
+
+// 从 targetAbs 出发，沿反向依赖图传递求「能依赖它的所有文件」
+function reverseReachableFrom(rev, targetAbs) {
   const reached = new Set();
   const seen = new Set();
   const stack = [path.resolve(targetAbs)];
@@ -110,7 +116,9 @@ const BROAD_IMPACT = /(^|\/)(package\.json|package-lock\.json|pnpm-lock\.yaml|ya
 // repoDir: 实际被测目录（绝对）；gitRoot: git 仓库根（绝对）
 export function selectTests({ repoDir, gitRoot, changedFiles }) {
   // 可运行全集：仅 node --test 能跑的文件（排除 *.spec.js 等需独立 runner 的框架文件）
-  const runnable = allJsFiles(repoDir).filter(isRunnableTest);
+  // 复用 buildImportGraph 已扫描的全仓库文件清单，避免重复全量扫描
+  const { files, rev } = buildImportGraph(repoDir);
+  const runnable = files.filter(isRunnableTest);
   if (!changedFiles || changedFiles.length === 0) {
     return { testFiles: runnable, narrowed: false, reason: '无改动（全量回归）' };
   }
@@ -137,9 +145,9 @@ export function selectTests({ repoDir, gitRoot, changedFiles }) {
 
   const picked = new Set(changedTestAbs.filter(isRunnableTest));
 
-  // 启发式 3：导入图反向可达（传递依赖）
+  // 启发式 3：导入图反向可达（传递依赖）—— 复用上面已构建的 rev 图
   for (const s of changedSrcAbs) {
-    for (const t of reverseReachableTests(repoDir, s)) {
+    for (const t of reverseReachableFrom(rev, s)) {
       if (isRunnableTest(t)) picked.add(t);
     }
   }

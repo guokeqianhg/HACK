@@ -22,14 +22,42 @@ const ROOT = path.join(__dirname, '..');
 
 // ---------- 参数 ----------
 const args = process.argv.slice(2).reduce((m, a, i, arr) => {
-  if (a.startsWith('--')) m[a.slice(2)] = arr[i + 1];
+  if (a.startsWith('--')) {
+    const k = a.slice(2);
+    const v = arr[i + 1];
+    // 支持「不带值的开关」如 --help：下一个 token 仍是 -- 开头或无则记为 true
+    m[k] = v === undefined || v.startsWith('--') ? true : v;
+  }
   return m;
 }, {});
+
+if (args.help) {
+  console.log(`AI 测试官 · 执行引擎（理解 diff → 规划 → 真实跑测 → 报告）
+用法：
+  node agent/run-test-officer.mjs --repo <dir> --base <ref> --target <ref> --scenario <A|B|C>
+                                [--requirement <json>] [--out <name>] [--triggeredBy <text>]
+
+场景：
+  A  代码改动驱动：git diff base..target → 精准选测 → 在目标分支真实跑测
+  B  需求驱动：读 requirement JSON → 需求覆盖度报告（需 --requirement，默认 docs/requirement-demo.json）
+  C  持续巡检用：base==target 时为全量回归（实际由 cron-monitor 调用）
+
+示例：
+  node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
+  node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --requirement sample-app/docs/requirement-demo.json`);
+  process.exit(0);
+}
+
 const repoDir = path.resolve(ROOT, args.repo || 'sample-app');
 const base = args.base || 'main';
 const target = args.target || 'HEAD';
 const scenario = args.scenario || 'A';
 const triggeredBy = args.triggeredBy || `分支 ${target} 对比 ${base}`;
+
+if (!['A', 'B', 'C'].includes(scenario)) {
+  console.error(`❌ 非法 --scenario "${scenario}"，仅支持 A / B / C（用 --help 查看用法）`);
+  process.exit(1);
+}
 
 // ---------- 1. 理解：git diff ----------
 function git(cwd, ...argv) {
@@ -147,7 +175,9 @@ async function runInWorktree(targetRef, testFiles) {
     // 把仓库内绝对测试路径映射到 worktree 内对应路径（精准选测的子集，或全量兜底）
     const wtTestFiles = testFiles.map((f) => path.join(sutInWt, path.relative(repoDir, f)));
     const runTests = wtTestFiles.length ? wtTestFiles : globSync(path.join(sutInWt, 'tests', '*.test.js'));
-    testOut = await run(sutInWt, 'node', ['--test', ...runTests]);
+    // 显式锁定 spec reporter：node:test 默认 reporter 受环境/版本影响，
+    // 锁定后 parseNodeTest 才能稳定按 ✔/✖ 行解析，避免解析失败导致结果丢失
+    testOut = await run(sutInWt, 'node', ['--test', '--test-reporter=spec', ...runTests]);
     smokeOut = await run(sutInWt, 'node', ['smoke/api-smoke.mjs']);
   } finally {
     // 无论成功或失败都清理 worktree，避免 detached 分支/工作树残留污染仓库
