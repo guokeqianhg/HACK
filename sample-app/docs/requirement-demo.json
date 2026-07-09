@@ -8,10 +8,10 @@
     "src/order.js"
   ],
   "points": [
-    { "id": "P1", "desc": "满减券：订单达门槛立减固定金额，未达门槛则不生效", "module": "src/coupon.js" },
-    { "id": "P2", "desc": "无门槛立减券：直接立减固定金额", "module": "src/coupon.js" },
-    { "id": "P3", "desc": "折扣券：在前面减完后按比例减价（如 9 折 = 减 10%）", "module": "src/coupon.js" },
-    { "id": "P4", "desc": "最终应付金额不低于 0（价格不为负）", "module": "src/coupon.js" },
+    { "id": "P1", "desc": "满减券：订单达门槛立减固定金额，未达门槛则不生效", "module": "src/coupon.js", "tests": ["满减券"] },
+    { "id": "P2", "desc": "无门槛立减券：直接立减固定金额", "module": "src/coupon.js", "tests": ["无门槛立减"] },
+    { "id": "P3", "desc": "折扣券：在前面减完后按比例减价（如 9 折 = 减 10%）", "module": "src/coupon.js", "tests": ["折扣券"] },
+    { "id": "P4", "desc": "最终应付金额不低于 0（价格不为负）", "module": "src/coupon.js", "tests": ["价格不为负"] },
     { "id": "P5", "desc": "库存不足时下单失败并回滚已扣库存", "module": "src/inventory.js" },
     { "id": "P6", "desc": "下单成功返回订单号、原价、应付金额与优惠明细", "module": "src/order.js" }
   ]

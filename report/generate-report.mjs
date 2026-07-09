@@ -58,7 +58,7 @@ const renderProcess = processSteps.map((p, i) => `
     <div class="pdetail">${p.detail || ''}</div>
   </div>`).join('');
 
-const covStatus = { pass: '✅ 已覆盖', fail: '❌ 不达标', gap: '⚠️ 测试缺口' };
+const covStatus = { pass: '✅ 已实现', fail: '❌ 测试不达标', missing: '⛔ 无实现(真缺口)', stub: '🟠 疑似桩', untested: '⚠️ 未测试' };
 const renderCoverage = coverage.length
   ? coverage.map((c) => `
   <tr class="cov-${c.status}">
@@ -67,6 +67,7 @@ const renderCoverage = coverage.length
     <td><code>${c.module}</code></td>
     <td><b>${covStatus[c.status] || c.status}</b></td>
     <td>${(c.tests || []).map((t) => `<code>${t}</code>`).join(' ') || '-'}</td>
+    <td>${c.note || '-'}</td>
   </tr>`).join('')
   : '';
 
@@ -105,7 +106,9 @@ const html = `<!DOCTYPE html>
   ul{margin:0;padding-left:18px}
   .cov-pass td:nth-child(4){color:#2b8a3e}
   .cov-fail td:nth-child(4){color:#c0392b}
-  .cov-gap td:nth-child(4){color:#e67e22}
+  .cov-missing td:nth-child(4){color:#c0392b}
+  .cov-stub td:nth-child(4){color:#e67e22}
+  .cov-untested td:nth-child(4){color:#e67e22}
 </style></head>
 <body>
 <header><h1>🤖 ${meta.title || 'AI 测试官报告'}</h1>
@@ -136,7 +139,7 @@ const html = `<!DOCTYPE html>
   ${coverage.length ? `
   <div class="card">
     <h2>需求覆盖度（场景 B）</h2>
-    <table><thead><tr><th>测试点</th><th>需求描述</th><th>模块</th><th>状态</th><th>关联测试</th></tr></thead>
+    <table><thead><tr><th>测试点</th><th>需求描述</th><th>模块</th><th>状态</th><th>关联测试</th><th>核对说明</th></tr></thead>
     <tbody>${renderCoverage}</tbody></table>
   </div>` : ''}
 

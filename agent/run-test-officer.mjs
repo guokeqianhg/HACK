@@ -202,17 +202,83 @@ function readRequirement(p) {
   return raw;
 }
 
-// 场景 B：把需求点映射到测试执行结果，产出「需求覆盖度」
-//   status: pass（有测试且全过）/ fail（该模块直接对应测试有失败）/ gap（无对应测试 → 测试缺口）
+// 场景 B：通用「实现核对」探针 —— 仅基于模块结构判断需求点是否真的有代码落地，
+// 不读取/匹配任何业务关键词，对任意 repo 与需求 fixture 可复用（防过拟合）。
+// 判定信号：模块是否存在、是否存在非桩的实质实现（函数/类/导出 + 足够代码行）。
+function probeImplementation(repoDir, moduleRel) {
+  const base = { exists: false, hasImpl: false, lines: 0, codeLines: 0 };
+  if (!moduleRel) return { ...base, note: '未指定模块' };
+  let src;
+  try {
+    src = fs.readFileSync(path.resolve(repoDir, moduleRel), 'utf8');
+  } catch {
+    return { ...base, note: '源码模块不存在' };
+  }
+  const lines = src.split('\n').length;
+  const codeLines = src.split('\n').filter((l) => {
+    const t = l.trim();
+    return t && !t.startsWith('//') && !t.startsWith('/*') && !t.startsWith('*');
+  }).length;
+  // 通用「非桩」判定：存在函数/类/导出/赋值等实质实现结构（与具体业务名无关）
+  const hasStructure = /(function\s+\w+|const\s+\w+\s*=|let\s+\w+\s*=|class\s+\w+|=>\s*\{|export\s+(default\s+)?(function|class|const|let|var|\{)|\bmodule\.exports)/.test(src);
+  const hasImpl = hasStructure && codeLines >= 3;
+  return {
+    exists: true,
+    hasImpl,
+    lines,
+    codeLines,
+    note: hasImpl ? '实现存在' : '模块存在但无实质实现（疑似桩）',
+  };
+}
+
+// 场景 B：把需求点映射到「源码实现核对 + 测试执行结果」，产出「需求覆盖度」
+//   status: pass（实现存在且测试通过）/ fail（实现有、测试有、但测试失败）
+//           untested（实现存在但无对应测试）/ stub（模块在但疑似桩）/ missing（模块根本不存在）
+//   可选 per-point 精确核对：point.tests 为「测试用例名子串」数组，命中则按这些用例的
+//   真实结果判定，避免「同模块多需求点一损俱损」误报；未提供则回退通用模块级判定。
+//   （tests 仅为名称子串，代码不写任何业务语义，对任意 repo/需求 fixture 通用。）
 function computeCoverage(req, results, repoDir) {
   const failingFiles = new Set(results.filter((r) => r.status === 'fail' && r.testFile).map((r) => r.testFile));
   return req.points.map((pt) => {
     const tFiles = testsForModule(repoDir, pt.module).map((f) => path.basename(f));
-    let status;
-    if (tFiles.length === 0) status = 'gap';
-    else if (tFiles.some((t) => failingFiles.has(t))) status = 'fail';
-    else status = 'pass';
-    return { id: pt.id, desc: pt.desc, module: pt.module, status, tests: tFiles };
+    const impl = probeImplementation(repoDir, pt.module);
+    let status, note;
+
+    // 1) 优先：per-point 精确核对（point.tests 命中真实用例名）
+    if (Array.isArray(pt.tests) && pt.tests.length) {
+      const matched = results.filter((r) => pt.tests.some((p) => r.name && r.name.includes(p)));
+      if (matched.length) {
+        const failed = matched.filter((r) => r.status === 'fail');
+        if (failed.length) {
+          status = 'fail';
+          note = `关联用例未通过（${failed.map((r) => r.name).join('、')}）`;
+        } else {
+          status = 'pass';
+          note = `关联用例全部通过（${matched.length} 个）`;
+        }
+        return { id: pt.id, desc: pt.desc, module: pt.module, status, note, impl, tests: tFiles };
+      }
+      // 声明了 tests 但无用例命中 → 回退模块级
+    }
+
+    // 2) 通用模块级核对（兜底）
+    if (!impl.exists) {
+      status = 'missing';
+      note = impl.note || '源码模块不存在';
+    } else if (!impl.hasImpl) {
+      status = 'stub';
+      note = impl.note || '模块存在但疑似桩实现';
+    } else if (tFiles.length === 0) {
+      status = 'untested';
+      note = '实现存在但无对应测试';
+    } else if (tFiles.some((t) => failingFiles.has(t))) {
+      status = 'fail';
+      note = '模块测试未通过，实现可能不正确';
+    } else {
+      status = 'pass';
+      note = '已实现且模块测试通过';
+    }
+    return { id: pt.id, desc: pt.desc, module: pt.module, status, note, impl, tests: tFiles };
   });
 }
 
@@ -271,7 +337,7 @@ async function main() {
     const results = [...unit, ...api];
     const coverage = computeCoverage(req, results, repoDir);
     const covered = coverage.filter((c) => c.status === 'pass').length;
-    const gaps = coverage.filter((c) => c.status === 'gap').length;
+    const gaps = coverage.filter((c) => ['missing', 'stub', 'untested'].includes(c.status)).length;
     const failingPts = coverage.filter((c) => c.status === 'fail').length;
 
     const plan = [

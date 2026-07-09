@@ -38,3 +38,9 @@ test('价格不为负', () => {
   const r = applyCouponStack(1000, [{ id: 'N1', type: 'nofloor', minusCents: 5000 }]);
   assert.equal(r.finalCents, 0);
 });
+
+test('无门槛立减券：直接立减固定金额', () => {
+  const r = applyCouponStack(10000, [{ id: 'N1', type: 'nofloor', minusCents: 1000 }]);
+  assert.equal(r.finalCents, 9000);
+  assert.equal(r.applied.length, 1);
+});
