@@ -1,5 +1,6 @@
 // AI 测试官 · 执行引擎（闭环：理解 diff → 规划 → 真实跑测 → 生成报告）
-// 零依赖：基于 git + node --test + node smoke/api-smoke.mjs
+// 核心零依赖：基于 git + node --test + node smoke/api-smoke.mjs
+// 前端体验链路（可选）：worktree 起 SUT 服务 + Playwright 跑 ui-smoke（需 sample-app 安装 @playwright/test）
 //
 // 用法：
 //   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
@@ -13,6 +14,7 @@ import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import net from 'node:net';
 import { globSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { selectTests, isSourceFile, isTestFile, testsForModule } from './select-tests.mjs';
@@ -91,12 +93,13 @@ function analyzeDiff(diffText) {
 }
 
 // ---------- 2. 执行：在 worktree 真实跑测 ----------
-function run(cwd, cmd, cmdArgs) {
-  return new Promise((res) => {
-    const p = spawn(cmd, cmdArgs, { cwd, windowsHide: true });
+function run(cwd, cmd, cmdArgs, opts = {}) {
+  return new Promise((res, rej) => {
+    const p = spawn(cmd, cmdArgs, { cwd, windowsHide: true, env: opts.env || process.env, shell: !!opts.shell });
     let out = '';
     p.stdout.on('data', (d) => (out += d));
     p.stderr.on('data', (d) => (out += d));
+    p.on('error', (e) => rej(e)); // spawn 失败（如二进制缺失）转为 reject，避免未捕获崩溃
     p.on('close', (code) => res({ code, out }));
   });
 }
@@ -166,9 +169,109 @@ function parseApiSmoke(out) {
   return results;
 }
 
+function parsePlaywright(out, code) {
+  const results = [];
+  let cur = null;
+  for (const raw of out.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    // 通过：✓ name (Xs)
+    const mPass = line.match(/^\s*[✓✔]\s+(.+?)\s+\([\d.]+s\)/);
+    if (mPass) {
+      cur = { name: mPass[1].trim(), type: 'ui', status: 'pass', severity: '-', rootCause: '-', repro: 'playwright test smoke/ui-smoke.spec.js', testFile: 'ui-smoke.spec.js' };
+      results.push(cur);
+      continue;
+    }
+    // 失败：  1) file:line › name ───────
+    const mFail = line.match(/^\s*\d+\)\s+.+?›\s+(.+?)\s+─{5,}/);
+    if (mFail) {
+      cur = { name: mFail[1].trim(), type: 'ui', status: 'fail', severity: 'high', rootCause: '', repro: 'playwright test smoke/ui-smoke.spec.js', testFile: 'ui-smoke.spec.js' };
+      results.push(cur);
+      continue;
+    }
+    // 收集失败用例的根因（Error / Expected / Received / Locator 等）
+    if (cur && cur.status === 'fail') {
+      const t = line.trim();
+      if (t && /^(Error|Expected|Received|Locator|Timeout|Call log|- |at )/.test(t) && !/^\d+ (passed|failed)/.test(t)) {
+        cur.rootCause += t + ' ';
+      }
+    }
+  }
+  // 兜底：解析不出但退出码非 0 → 记为失败（如浏览器未安装）
+  if (results.length === 0) {
+    results.push({
+      name: '前端 UI 冒烟（Playwright）',
+      type: 'ui',
+      status: code === 0 ? 'pass' : 'fail',
+      severity: code === 0 ? '-' : 'high',
+      rootCause: code === 0 ? '-' : 'UI 冒烟执行异常（详见日志/浏览器未安装）',
+      repro: 'playwright test smoke/ui-smoke.spec.js',
+      testFile: 'ui-smoke.spec.js',
+    });
+  }
+  return results;
+}
+
+// 取一个当前空闲端口，避免多次运行间 SUT 服务端口冲突（曾导致 UI 测连到上次的残留服务）
+function getFreePort() {
+  return new Promise((res, rej) => {
+    const srv = net.createServer();
+    srv.on('error', rej);
+    srv.listen(0, () => {
+      const port = srv.address().port;
+      srv.close(() => res(port));
+    });
+  });
+}
+
+// 前端体验链路（可选）：仅当 sample-app 已安装 @playwright/test 时生效；否则优雅跳过，不阻塞后端闭环。
+// 做法：在 worktree 起 SUT 服务（测试目标 ref 的真实前端）→ 用主仓库已装的 Playwright 驱动浏览器访问该服务。
+// （ui-smoke.spec.js 仅做环境无关的浏览器操作，故复用主仓库副本即可，避免在每个 worktree 重复装浏览器。）
+async function runUiSmoke(sutInWt) {
+  // Windows 上 .bin/playwright 实为 .cmd 包装；直接 spawn 无扩展名会 ENOENT，需用平台正确路径
+  const pwBase = path.join(repoDir, 'node_modules', '.bin', 'playwright');
+  const pwBin = process.platform === 'win32' && fs.existsSync(pwBase + '.cmd') ? pwBase + '.cmd' : pwBase;
+  const specFile = path.join(repoDir, 'smoke', 'ui-smoke.spec.js');
+  const skip = (reason) => ([{
+    name: '前端 UI 冒烟（Playwright）', type: 'ui', status: 'skip', severity: '-',
+    rootCause: reason, repro: 'playwright test smoke/ui-smoke.spec.js', testFile: 'ui-smoke.spec.js',
+  }]);
+  if (!fs.existsSync(pwBin)) {
+    return skip('环境未安装 @playwright/test（前端链路跳过）。在 sample-app 执行 `npm i -D playwright && npx playwright install chromium` 后生效。');
+  }
+  if (!fs.existsSync(specFile)) return skip('未找到 ui-smoke.spec.js');
+
+  const port = await getFreePort();
+  const base = `http://localhost:${port}`;
+  const server = spawn('node', ['src/server.js'], { cwd: sutInWt, env: { ...process.env, PORT: String(port) }, windowsHide: true });
+  let uiResults;
+  try {
+    // 等待 SUT 就绪
+    let ready = false;
+    for (let i = 0; i < 50; i++) {
+      try { const r = await fetch(`${base}/api/products`); if (r.ok) { ready = true; break; } } catch {}
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    if (!ready) {
+      uiResults = [{ name: '前端 UI 冒烟（Playwright）', type: 'ui', status: 'fail', severity: 'high', rootCause: 'SUT 服务未能在 worktree 启动（前端链路无法验证）', repro: 'npm start', testFile: 'ui-smoke.spec.js' }];
+    } else {
+      // spec 路径统一转正斜杠：Playwright 把位置参数当正则过滤，反斜杠会被误判导致 "No tests found"
+      const specArg = specFile.replace(/\\/g, '/');
+      const pwArgs = ['test', specArg, '--reporter=line'];
+      // Windows 用 cmd /c 数组式调用 .cmd（最稳，无 EINVAL）；其他平台直接执行二进制
+      const out = process.platform === 'win32'
+        ? await run(repoDir, 'cmd', ['/c', pwBin, ...pwArgs], { env: { ...process.env, SUT_URL: base } })
+        : await run(repoDir, pwBin, pwArgs, { env: { ...process.env, SUT_URL: base } });
+      uiResults = parsePlaywright(out.out, out.code);
+    }
+  } finally {
+    try { server.kill(); } catch {}
+  }
+  return uiResults;
+}
+
 async function runInWorktree(targetRef, testFiles) {
   const wt = path.join(os.tmpdir(), `aio-${Date.now()}`);
-  let testOut, smokeOut;
+  let testOut, smokeOut, uiOut = [];
   try {
     await git(repoDir, 'worktree', 'add', '--detach', wt, targetRef);
     const sutInWt = path.join(wt, path.relative(ROOT, repoDir)); // worktree 含整个仓库树，SUT 在 wt/<相对路径>
@@ -179,19 +282,27 @@ async function runInWorktree(targetRef, testFiles) {
     // 锁定后 parseNodeTest 才能稳定按 ✔/✖ 行解析，避免解析失败导致结果丢失
     testOut = await run(sutInWt, 'node', ['--test', '--test-reporter=spec', ...runTests]);
     smokeOut = await run(sutInWt, 'node', ['smoke/api-smoke.mjs']);
+    // 前端体验链路（可选）：失败或异常不影响后端闭环结果
+    try {
+      uiOut = await runUiSmoke(sutInWt);
+    } catch (e) {
+      uiOut = [{ name: '前端 UI 冒烟（Playwright）', type: 'ui', status: 'skip', severity: '-', rootCause: `UI 链路执行异常已忽略：${e.message}`, repro: 'playwright test smoke/ui-smoke.spec.js', testFile: 'ui-smoke.spec.js' }];
+    }
   } finally {
     // 无论成功或失败都清理 worktree，避免 detached 分支/工作树残留污染仓库
     await git(repoDir, 'worktree', 'remove', '--force', wt).catch(() => {});
   }
-  return { unit: parseNodeTest(testOut.out), api: parseApiSmoke(smokeOut.out) };
+  return { unit: parseNodeTest(testOut.out), api: parseApiSmoke(smokeOut.out), ui: uiOut };
 }
 
 // ---------- 3. 报告 ----------
 function summarize(results) {
-  const pass = results.filter((r) => r.status === 'pass').length;
-  const fail = results.filter((r) => r.status === 'fail').length;
+  // skip（如 Playwright 未装）不计入总数/通过率，避免污染统计，仅在结果表如实展示
+  const effective = results.filter((r) => r.status !== 'skip');
+  const pass = effective.filter((r) => r.status === 'pass').length;
+  const fail = effective.filter((r) => r.status === 'fail').length;
   const blocking = fail > 0 ? ['存在失败用例，须修复并复测通过后方可合入/发布'] : [];
-  return { total: results.length, pass, fail, blocking };
+  return { total: effective.length, pass, fail, blocking };
 }
 
 // 场景 B：读需求/缺陷 fixture（离线版 TAPD），结构通用：
@@ -333,8 +444,8 @@ async function main() {
     console.log(`📋 场景 B · 需求 ${req.id}（${req.points.length} 测试点）→ 关联 ${sel.testFiles.length} 个测试`);
 
     console.log('🧪 执行验证（worktree 真实跑测）…');
-    const { unit, api } = await runInWorktree(target, sel.testFiles);
-    const results = [...unit, ...api];
+    const { unit, api, ui } = await runInWorktree(target, sel.testFiles);
+    const results = [...unit, ...api, ...ui];
     const coverage = computeCoverage(req, results, repoDir);
     const covered = coverage.filter((c) => c.status === 'pass').length;
     const gaps = coverage.filter((c) => ['missing', 'stub', 'untested'].includes(c.status)).length;
@@ -379,8 +490,8 @@ async function main() {
   console.log(`   ${sel.narrowed ? '🎯 精准选测' : '⚠️ 全量回退'}：${sel.reason}`);
 
   console.log('🧪 执行验证（worktree 真实跑测）…');
-  const { unit, api } = await runInWorktree(target, sel.testFiles);
-  const results = [...unit, ...api];
+  const { unit, api, ui } = await runInWorktree(target, sel.testFiles);
+  const results = [...unit, ...api, ...ui];
 
   const plan = [
     { step: `读 git diff ${base}..${target}`, why: '定位改动文件，判断影响面' },

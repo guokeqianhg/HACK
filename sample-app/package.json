@@ -10,5 +10,9 @@
     "smoke:api": "node smoke/api-smoke.mjs",
     "smoke:ui": "playwright test smoke/ui-smoke.spec.js"
   },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "playwright": "^1.61.1"
+  },
   "license": "MIT"
 }

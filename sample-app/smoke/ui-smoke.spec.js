@@ -18,5 +18,6 @@ test('核心路径：加购 → 用 9 折券结算 → 成功下单', async ({ p
   const result = page.getByTestId('result');
   await expect(result).toHaveClass('ok');
   await expect(result).toContainText('ORD');
-  await expect(result).toContainText('¥269.10');
+  // 校验「应付金额」为 9 折后的 ¥269.10（而非折扣额 ¥269.10，避免误判）
+  await expect(result).toContainText('应付 ¥269.10');
 });

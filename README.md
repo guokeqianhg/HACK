@@ -1,6 +1,6 @@
 # 方向二【AI测试官】全链路自动化测试 Agent
 
-一个能**理解变更 → 规划策略 → 执行验证 → 产出可决策报告**的测试 Agent，覆盖后端逻辑（前端体验链路规划接入中）。
+一个能**理解变更 → 规划策略 → 执行验证 → 产出可决策报告**的测试 Agent，覆盖后端逻辑到前端体验（Playwright UI 冒烟，需安装 Playwright 后生效）。
 
 ## 仓库结构
 ```
@@ -24,13 +24,21 @@ f:/HACK
 | B 需求文档 | 传需求 | 拆解测试点 → 源码结构核对实现 + 测试覆盖度 → 缺口/不达标标注 | 需求覆盖度报告 |
 | C 持续巡检 | 定时/automation | 走核心路径冒烟 → 异常收集根因 → 推送 | 定时巡检+异常推送 |
 
-## 快速开始（零依赖、离线可跑）
+## 快速开始（核心零依赖、离线可跑）
 ```bash
 cd sample-app
 npm test                 # 运行后端单测（node --test）
 node smoke/api-smoke.mjs # 离线 API 冒烟（场景 C 兜底）
 npm start                # 启动 SUT（http://localhost:3000）可用 Playwright 验证 UI
 ```
+**前端体验链路（可选，P0）**：在 `sample-app` 安装 Playwright 后，「AI 测试官」闭环会自动在 worktree 起 SUT 服务并用真实浏览器跑 `ui-smoke.spec.js`，把前端验证并入报告。
+```bash
+cd sample-app
+npm i -D playwright        # 安装 @playwright/test（已写入 devDependencies）
+npx playwright install chromium   # 安装 Chromium 浏览器
+```
+> 未安装 Playwright 时，闭环**不受影响**：前端 UI 冒烟在报告中以 `⏭ SKIP` 如实标注，后端单测 + API 冒烟照常产出报告（评审现场零依赖可演示）。
+
 生成报告看板：
 ```bash
 node report/generate-report.mjs   # 读取 report/report.json → report/index.html
@@ -49,7 +57,7 @@ node agent/run-test-officer.mjs --repo sample-app --base main --target feature/c
 cd sample-app
 git diff main feature/coupon-bug   # 查看改动（单文件：折扣券 9 折算成 1 折）
 ```
-真实可跑：AI 测试官读取 diff → 影响分析 → 运行 `node --test` 与 `node smoke/api-smoke.mjs` → 生成含严重级别/根因/复现的报告。
+真实可跑：AI 测试官读取 diff → 影响分析 → 运行 `node --test`、API 冒烟 `node smoke/api-smoke.mjs`，并在安装 Playwright 后自动追加真实浏览器 UI 冒烟（结账/折扣券路径）→ 生成含严重级别/根因/复现的报告。
 （全量回归口径：在 `main` 上为 19 通过 / 0 失败；在 `feature/coupon-bug` 上为 15 通过 / 4 失败，暴露资损 bug（4 失败均来自同一折扣券 bug：折扣券 9 折算成 1 折，及其引发的叠加/下单/API 链路失败）。注意：场景 A/B 走「精准选测」只跑受影响测试，故 demo 产物为 10 通过 / 4 失败（A）与 13 通过 / 4 失败（B）——三种口径失败项同源。注：以上为**提交后**口径，因执行引擎基于已提交 ref 建 worktree 跑测；本次为「无门槛立减」补了 1 个孤立单测，总用例 +1。）
 
 ## 演示「持续巡检 + 异常推送」(场景 C)
@@ -105,7 +113,7 @@ node agent/cron-monitor.mjs --branch main
 - **AI 测试官过程时间线**：理解变更 → 影响面分析 → 选测策略 → 执行验证 → 生成报告，逐步可视化（异常步高亮）。
 - **通过率进度条**：总用例 / 通过 / 失败 + 通过率百分比。
 - **需求覆盖度矩阵（场景 B）**：对每个需求点做「源码结构核对（模块存在/非桩）+ 测试覆盖」，状态含 ✅ 已实现 / ❌ 测试不达标 / ⛔ 无实现 / 🟠 疑似桩 / ⚠️ 未测试；需求点可声明 `tests`（用例名子串）做**用例级精确核对**，避免同模块多需求点「一损俱损」误报，直接暴露实现缺口与测试盲区。
-- **执行结果表**：用例 / 类型 / 状态 / 严重级 / 根因 / 复现。
+- **执行结果表**：用例 / 类型（unit/api/ui）/ 状态 / 严重级 / 根因 / 复现；前端 UI 未装 Playwright 时显示 `⏭ SKIP` 不计入通过率。
 
 ## 平台能力（Box/CodeBuddy）
 - **TGit/工蜂 MCP**：读 PR/MR diff（场景 A）
