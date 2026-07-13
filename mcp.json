@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "gongfeng": {
-      "description": "工蜂(TGit) MCP：读取 PR/MR diff（如 get_merge_request_diff），用于场景 A 理解代码改动；取回的 diff 写入 report/.mcp-diff.txt 后经 run-test-officer.mjs --diff 喂入",
+      "description": "工蜂(TGit) MCP：读取 PR/MR diff（如 get_merge_request_diff），用于场景 A 理解代码改动；取回的 diff 写入 report/.mcp-diff.txt 后经 run-test-officer.mjs --diff 喂入。注意：执行引擎也已内置直连工蜂 REST API 的真实拉取（--pr <iid> + TGIT_TOKEN 时 fetchTGitMRDiff 直接拉真实 MR diff），因此即使宿主不编排 MCP，真闭环依旧成立。",
       "command": "npx",
       "args": ["-y", "@tencent/tgit-mcp-server"],
       "env": { "TGG_TOKEN": "${TGIT_TOKEN}" }
@@ -18,7 +18,7 @@
       "args": ["-y", "@playwright/mcp@latest"]
     },
     "knot-bot": {
-      "description": "企微机器人 / Knot webhook：将测试报告实时推送给开发或值班（场景 C）",
+      "description": "企微机器人 / Knot webhook：将测试报告实时推送给开发或值班（场景 A/B/C）。执行引擎内置 pushToWeChat()，配置 --webhook <url> 或 WEBHOOK_URL 即经企微机器人 webhook 真实推送（markdown 消息，与 cron-monitor 同协议），失败/未配置时优雅降级落盘 report/.officer-last-message.md。",
       "url": "${WEBHOOK_URL}"
     }
   }

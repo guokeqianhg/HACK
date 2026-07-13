@@ -24,6 +24,23 @@ f:/HACK
 | B 需求文档 | 传需求 | 拆解测试点 → 源码结构核对实现 + 测试覆盖度 → 缺口/不达标标注 | 需求覆盖度报告 |
 | C 持续巡检 | 定时/automation | 走核心路径冒烟 → 异常收集根因 → 推送 | 定时巡检+异常推送 |
 
+## AI 语义能力（LLM 接入 · 可选但推荐）
+「理解变更 / 规划策略 / 根因推理」由大模型驱动，而非仅正则 / 导入图。引擎通过 `agent/llm.mjs` 调用 **OpenAI 兼容 Chat Completions** 协议，配置环境变量即可启用；**未配置则自动回退确定性逻辑，离线 Demo 不受影响**。
+
+| 环境变量 | 说明 | 默认 |
+|---|---|---|
+| `LLM_API_KEY` | 模型 API Key（不填则关闭 AI 语义层）| 无（回退）|
+| `LLM_BASE_URL` | 兼容端点，可指向混元 / DeepSeek / 本地 ollama 等 | `https://api.openai.com/v1` |
+| `LLM_MODEL` | 模型名 | `gpt-4o-mini` |
+
+启用后：场景 A/C 的「理解变更」会输出改动意图、风险等级、受影响业务流程与建议验证重点（自然语言，并写入报告时间线）；失败用例的 `rootCause` 由模型结合 diff + 日志做语义归因而非正则提取。
+
+## 自适应策略（P1 · 失败驱动的动态闭环）
+引擎不再是「固定流水线跑完即结束」：首轮执行若出现失败，会自动进入自适应阶段，根据中间结果调整后续策略：
+- **扩展选测（发现隐性影响面）**：从失败用例实际 import 的源码模块出发，沿导入图反向可达找出「首轮未覆盖、但共享同一依赖」的其它测试并补跑——弥补精准选测可能遗漏的间接影响。
+- **深度复跑确认**：对失败单测 / API / UI 链路二次复跑，确认可复现并抓取完整根因（覆盖 `reproConfirmed` 标记），避免把偶发抖动误报为缺陷。
+- **决策来源**：启用 LLM 时由模型判断 `expandScope / deepDive` 并给出理由（写入报告时间线「⑤ 自适应策略」）；离线时走确定性启发式（有失败即触发）。
+
 ## 快速开始（核心零依赖、离线可跑）
 ```bash
 cd sample-app
@@ -38,6 +55,11 @@ npm i -D playwright        # 安装 @playwright/test（已写入 devDependencies
 npx playwright install chromium   # 安装 Chromium 浏览器
 ```
 > 未安装 Playwright 时，闭环**不受影响**：前端 UI 冒烟在报告中以 `⏭ SKIP` 如实标注，后端单测 + API 冒烟照常产出报告（评审现场零依赖可演示）。
+
+**演示前 UI 链路就绪自检**（避免评审机未装浏览器导致 UI 变 `SKIP`）：
+```bash
+node agent/check-ui-ready.mjs   # 校验 @playwright/test / Chromium 二进制 / ui-smoke.spec.js，输出 🟢 GO 或缺失项+修复命令
+```
 
 生成报告看板：
 ```bash
@@ -122,3 +144,23 @@ node agent/cron-monitor.mjs --branch main
 - **Playwright MCP**：驱动真实浏览器（前端体验）；或沿用引擎内置的 `@playwright/test` UI 冒烟。
 - **automation 定时任务 + 企微/Knot webhook**：场景 C 持续巡检与异常推送（见上）。
 - 离线兜底：MCP 不可用时，全部回退本地 `git diff` / 本地 `docs/requirement-demo.json` / 本地 HTML 报告，全链路仍成立。
+
+## 真 MCP 闭环（直连 REST/HTTP，不依赖宿主编排）
+MCP 工具由驱动本 Agent 的 LLM 宿主调用；为让「平台能力」从装饰变**真可用**，执行引擎同时内置直连 REST/HTTP 的真实路径——即使宿主不编排 MCP，真闭环依旧成立：
+
+| 能力 | 真实路径（有凭据即生效） | 无凭据降级 |
+|---|---|---|
+| **场景 A 真实 MR diff** | `--pr <iid> [--pr-project owner/repo]` + `TGIT_TOKEN` → `fetchTGitMRDiff()` 直连 `GET {TGIT_API_BASE}/projects/{proj}/merge_requests/{iid}/changes` 拉真实改动 | 回退本地 `git diff base..target` |
+| **MR 评论回写** | 同上凭据 → `commentToPR()` `POST .../merge_requests/{iid}/notes` 真写评论 | 写 `report/pr-comment.md`（dry-run） |
+| **企微实时推送** | `--webhook <url>` 或 `WEBHOOK_URL` → `pushToWeChat()` `POST` 企微机器人 webhook，markdown 报告推送给值班/开发 | 跳过推送（保持零依赖） |
+
+```bash
+# 真闭环演示（评审环境配了工蜂/企微凭据时）：
+node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A \
+  --pr 123 --pr-project owner/repo --webhook "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx"
+# ① 引擎真实拉取 !123 的 MR diff（落盘 report/.mcp-diff.txt）
+# ② 跑测后真实回写 MR 评论（有 TGIT_TOKEN 时）
+# ③ 跑完真实把报告推送到企微（有 WEBHOOK_URL 时）
+```
+> 经本地 mock 工蜂 REST + 企微 webhook 验证：拉取/回写/推送三条 HTTP 路径均真实发起并已落盘，断言全 PASS。
+

@@ -34,6 +34,9 @@ const results = data.results || [];
 const summary = data.summary || {};
 const processSteps = data.process || [];
 const coverage = data.coverage || [];
+const generatedTests = data.generatedTests || [];
+const aiSuggestedPoints = data.aiSuggestedPoints || [];
+const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 const sevColor = { high: '#c0392b', medium: '#e67e22', low: '#2b8a3e' };
 const statusBadge = { pass: '✅ PASS', fail: '❌ FAIL', skip: '⏭ SKIP' };
@@ -51,6 +54,18 @@ const renderResults = results.map((r) => `
 
 const renderPlan = plan.map((p) => `<li><b>${p.step}</b> — ${p.why}</li>`).join('');
 
+// ReAct Agent 整体规划（问题3）：展示核心风险 / 补充选测 / 盲区 / 思考-行动轨迹
+const reactPlan = impact.reactPlan || null;
+const traceIcon = { think: '🧠 思考', act: '🛠 调用工具', answer: '✅ 结论' };
+const renderReactTrace = reactPlan && Array.isArray(reactPlan.trace)
+  ? reactPlan.trace.map((s) => {
+      if (s.kind === 'act') {
+        return `<li><b>${traceIcon.act}</b> <code>${esc(s.tool)}</code>${s.args && Object.keys(s.args).length ? ` <span style="color:#888">${esc(JSON.stringify(s.args))}</span>` : ''}</li>`;
+      }
+      return `<li><b>${traceIcon[s.kind] || s.kind}</b> ${esc(s.text || '')}</li>`;
+    }).join('')
+  : '';
+
 const renderProcess = processSteps.map((p, i) => `
   <div class="phase ${p.status}">
     <div class="pdot">${p.status === 'warn' ? '!' : i + 1}</div>
@@ -59,15 +74,22 @@ const renderProcess = processSteps.map((p, i) => `
   </div>`).join('');
 
 const covStatus = { pass: '✅ 已实现', fail: '❌ 测试不达标', missing: '⛔ 无实现(真缺口)', stub: '🟠 疑似桩', untested: '⚠️ 未测试' };
+const adequacyBadge = { strong: '✅ 充分', weak: '🟠 偏弱', none: '⛔ 无' };
+const renderCovAi = (c) => c.ai
+  ? `<b style="color:${c.ai.testAdequacy === 'strong' ? '#2b8a3e' : c.ai.testAdequacy === 'weak' ? '#e67e22' : '#c0392b'}">${adequacyBadge[c.ai.testAdequacy] || c.ai.testAdequacy || ''}</b>` +
+    (c.ai.reasoning ? `<div style="font-size:11px;color:#555">${esc(c.ai.reasoning)}</div>` : '') +
+    (c.ai.gap ? `<div style="font-size:11px;color:#c0392b">缺口：${esc(c.ai.gap)}</div>` : '')
+  : '-';
 const renderCoverage = coverage.length
   ? coverage.map((c) => `
   <tr class="cov-${c.status}">
     <td>${c.id}</td>
-    <td>${c.desc}</td>
-    <td><code>${c.module}</code></td>
+    <td>${esc(c.desc)}</td>
+    <td><code>${esc(c.module)}</code></td>
     <td><b>${covStatus[c.status] || c.status}</b></td>
-    <td>${(c.tests || []).map((t) => `<code>${t}</code>`).join(' ') || '-'}</td>
-    <td>${c.note || '-'}</td>
+    <td>${(c.tests || []).map((t) => `<code>${esc(t)}</code>`).join(' ') || '-'}</td>
+    <td>${esc(c.note) || '-'}</td>
+    <td>${renderCovAi(c)}</td>
   </tr>`).join('')
   : '';
 
@@ -139,8 +161,34 @@ const html = `<!DOCTYPE html>
   ${coverage.length ? `
   <div class="card">
     <h2>需求覆盖度（场景 B）</h2>
-    <table><thead><tr><th>测试点</th><th>需求描述</th><th>模块</th><th>状态</th><th>关联测试</th><th>核对说明</th></tr></thead>
+    <table><thead><tr><th>测试点</th><th>需求描述</th><th>模块</th><th>状态</th><th>关联测试</th><th>核对说明</th><th>AI 语义评审</th></tr></thead>
     <tbody>${renderCoverage}</tbody></table>
+  </div>` : ''}
+
+  ${generatedTests.length ? `
+  <div class="card">
+    <h2>AI 生成的回归测试（测试生成 Agent）</h2>
+    <table><thead><tr><th>针对用例</th><th>生成文件</th><th>状态</th><th>锁定的正确行为</th></tr></thead>
+    <tbody>${generatedTests.map((g) => `<tr><td>${esc(g.name)}</td><td><code>${esc(g.fileName || '-')}</code></td><td><b style="color:${g.status === 'reproduced' ? '#2b8a3e' : '#c0392b'}">${g.status === 'reproduced' ? '✅ 缺陷分支可复现' : '⚠️ 未生成'}</b></td><td>${esc(g.asserts || '-')}</td></tr>`).join('')}</tbody></table>
+    <p style="font-size:12px;color:#555">生成测试在【缺陷分支】失败 = 能抓住该 bug，已写入仓库 tests/ 作为回归守卫（修复后应通过，可纳入 CI 复跑）。</p>
+  </div>` : ''}
+
+  ${aiSuggestedPoints.length ? `
+  <div class="card">
+    <h2>AI 建议补充测试点（需求审计）</h2>
+    <ul>${aiSuggestedPoints.map((p) => `<li><b>${esc(p.desc)}</b> — ${esc(p.why || '')}</li>`).join('')}</ul>
+  </div>` : ''}
+
+  ${reactPlan ? `
+  <div class="card">
+    <h2>🧭 ReAct Agent 整体规划（自主策略）</h2>
+    <p><b>核心风险：</b>${esc(reactPlan.focus || '—')}</p>
+    <p><b>规划理由：</b>${esc(reactPlan.rationale || '—')}</p>
+    <p><b>是否含 UI 冒烟：</b>${reactPlan.includeUi ? '是' : '否'} ｜ <b>是否含 API 冒烟：</b>${reactPlan.includeApi ? '是' : '否'}</p>
+    ${(reactPlan.addedTests || []).length ? `<p><b>Agent 补充选测：</b>${reactPlan.addedTests.map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</p>` : ''}
+    ${(reactPlan.blindSpots || []).length ? `<div><b>识别的隐性盲区：</b><ul>${reactPlan.blindSpots.map((b) => `<li>${esc(b)}</li>`).join('')}</ul></div>` : ''}
+    ${renderReactTrace ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:600">思考 → 行动轨迹（ReAct 循环）</summary><ul style="margin-top:8px">${renderReactTrace}</ul></details>` : ''}
+    <p style="font-size:12px;color:#555">此节由真正的 ReAct Agent（Think→Act→Observe 循环 + Function Calling）产出：Agent 自主调用 get_diff / list_test_files 观察事实后，规划"测什么/顺序/是否含 UI/有无盲区"，其建议与结构选测取并集后执行。</p>
   </div>` : ''}
 
   <div class="card">

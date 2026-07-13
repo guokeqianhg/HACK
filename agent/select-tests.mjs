@@ -18,7 +18,7 @@ const TEST_RE = /\.(test|spec)\.[mc]?js$/;
 // 本执行引擎用 `node --test` 跑测，只认 node 原生测试文件（*.test.js / *-test.js / test-*.js）。
 // *.spec.js 是 Playwright/Vitest 等框架的通行约定，需其独立 runner，不能交给 node --test。
 // 此举基于「测试运行器约定」做通用过滤，不针对任何具体业务场景。
-function isRunnableTest(p) {
+export function isRunnableTest(p) {
   const b = path.basename(p);
   return /\.(test)\.[mc]?js$/.test(b) || /(^|[-_])test\.[mc]?js$/.test(b) || /^test-.*\.[mc]?js$/.test(b);
 }
@@ -109,8 +109,34 @@ export function testsForModule(repoDir, moduleRel) {
   return allJsFiles(repoDir).filter(isRunnableTest).filter((t) => stemOf(t) === modStem);
 }
 
-// 全局影响文件：改动它们应回退全量（通用基础设施感知，非业务硬编码）
-const BROAD_IMPACT = /(^|\/)(package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|tsconfig.*\.json|jsconfig\.json|jest\.config.*|vitest\.config.*|vite\.config.*|webpack.*|rollup.*|esbuild.*|babel\.config.*|Makefile|Dockerfile|\.github[\\/].*|\.gitlab-ci\.yml|build\.(js|sh|ps1))$/i;
+// ---------- 自适应策略用：失败后「扩展选测」----------
+// 给定一组（首轮失败的）测试文件，找出「与这些测试共享源码依赖、但首轮未跑到」的其它可运行测试。
+// 价值：首轮精准选测可能漏掉「间接依赖同一源码模块」的测试（隐性影响面），失败后据此扩展，
+// 把原本会漏报的关联失败暴露出来。仅基于导入图，不依赖任何业务语义。
+//   testFiles : 失败的测试文件绝对路径数组
+//   alreadyRun: 首轮已跑的测试文件绝对路径数组（会被排除，避免重复）
+//   limit    : 最多扩展多少个（防止失败测试依赖了被广泛使用的基础模块而爆炸）
+export function expandTests(repoDir, testFiles, alreadyRun = [], limit = 40) {
+  const { files, rev } = buildImportGraph(repoDir);
+  const already = new Set([...alreadyRun, ...testFiles].map((f) => path.resolve(f)));
+  const seeds = testFiles.map((f) => path.resolve(f));
+  // 1) 反查失败测试 import 的源码模块
+  const srcModules = new Set();
+  for (const t of seeds) for (const dep of importsOf(t)) srcModules.add(dep);
+  // 2) 再从这些源码模块反向可达，收集所有依赖它们的测试
+  const related = new Set();
+  for (const s of srcModules) {
+    for (const up of reverseReachableFrom(rev, s)) {
+      if (isRunnableTest(up) && !already.has(up)) related.add(up);
+    }
+  }
+  return [...related].slice(0, limit);
+}
+
+// 全局影响文件：改动它们应回退全量（通用基础设施感知，非业务硬编码）。
+// 注意：package.json / 各类 lock 文件只改变依赖环境，不改变"应跑哪些测试"，
+// 若把它们算作全局影响会无谓触发全量回归（尤其被测仓库是父仓库子目录时易误伤），故排除。
+const BROAD_IMPACT = /(^|\/)(tsconfig.*\.json|jsconfig\.json|jest\.config.*|vitest\.config.*|vite\.config.*|webpack.*|rollup.*|esbuild.*|babel\.config.*|Makefile|Dockerfile|\.github[\\/].*|\.gitlab-ci\.yml|build\.(js|sh|ps1))$/i;
 
 // changedFiles: 来自 git diff，路径相对于 git 仓库根（可能含 SUT 子目录前缀）
 // repoDir: 实际被测目录（绝对）；gitRoot: git 仓库根（绝对）
@@ -170,4 +196,21 @@ export function selectTests({ repoDir, gitRoot, changedFiles }) {
     narrowed: true,
     reason: `按导入图/同名关联出 ${pickedArr.length}/${runnable.length} 个测试文件`,
   };
+}
+
+// 列出仓库内全部可运行/接口/UI 测试（供 Agent 的 list_test_files 工具使用）。
+// 返回 [{ rel, abs, kind }]，kind: unit | api | ui（按路径/文件名通用判定，不依赖业务）。
+export function listAllTests(repoDir) {
+  const out = [];
+  for (const abs of allJsFiles(repoDir)) {
+    const rel = path.relative(repoDir, abs);
+    const b = path.basename(abs);
+    let kind = 'unit';
+    if (/api-smoke|smoke\/api/i.test(rel)) kind = 'api';
+    else if (/ui-smoke|smoke\/ui/i.test(rel)) kind = 'ui';
+    else if (!isRunnableTest(abs)) kind = 'other';
+    if (kind === 'other') continue;
+    out.push({ rel, abs, kind });
+  }
+  return out;
 }

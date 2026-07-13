@@ -11,18 +11,26 @@
 //   3. 报告：解析真实输出 → 写 report/report.json → 调 generate-report.mjs 渲染 HTML 看板
 //
 // MCP 接入（让平台能力从「装饰」变「可用」）：
-//   - 场景 A：TGit/工蜂 MCP 取 MR/PR diff → 写入文件 → --diff <file> 直接喂入，避免重复 git 计算，也支持跨仓库远程 diff
+//   - 场景 A：TGit/工蜂真实 MR diff —— 引擎内置 fetchTGitMRDiff() 直连工蜂 REST API（--pr <iid> + TGIT_TOKEN 即拉真实改动），
+//             也兼容宿主 MCP 取回后 --diff <file> 喂入；拉完回写 MR 评论（commentToPR）
 //   - 场景 B：TAPD MCP 取需求/缺陷 → 整理为 fixture JSON → --requirement <file> 注入
-//   （MCP 工具由驱动本 Agent 的 LLM 宿主调用；本脚本负责接收「MCP 取回的内容」并执行闭环）
+//   - 闭环收口：pushToWeChat() 经企微机器人 webhook 把报告实时推送给值班/开发
+//   （MCP 工具由驱动本 Agent 的 LLM 宿主调用；本脚本同时内置直连 REST/HTTP 的真实路径，即使宿主不编排 MCP，真闭环依旧成立）
 
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import net from 'node:net';
 import { globSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { selectTests, isSourceFile, isTestFile, testsForModule } from './select-tests.mjs';
+import { selectTests, isSourceFile, isTestFile, isRunnableTest, testsForModule, expandTests, listAllTests } from './select-tests.mjs';
+import { isLLMEnabled, callLLM, extractJSON, loadEnv, chat, _llmStats, fastModel, hasFastModel } from './llm.mjs';
+import { runAgent } from './agent.mjs';
+import { makeOfficerTools } from './officer-tools.mjs';
+
+// 启动时加载本地 .env（含 LLM 密钥）；未配置则整层 LLM 自动失效、回退确定性逻辑。
+await loadEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -59,15 +67,19 @@ if (args.help) {
 用法：
   node agent/run-test-officer.mjs --repo <dir> --base <ref> --target <ref> --scenario <A|B|C>
                                 [--requirement <json|md>] [--diff <file>] [--out <name>] [--triggeredBy <text>]
+                                [--pr <MR合并请求IID>] [--pr-project <owner/repo>]
+                                [--webhook <url>]
 
 场景：
-  A  代码改动驱动：git diff base..target（或 --diff 直接喂入 TGit/工蜂 MCP 取回的 MR diff）→ 精准选测 → 在目标分支真实跑测
+  A  代码改动驱动：diff 来源优先级 = 外部 --diff 文件 > 工蜂真实 MR diff（--pr + TGIT_TOKEN 直连 REST）> 本地 git diff
+      → 精准选测 → 在目标分支真实跑测 → 结果回写 MR 评论（--pr）并推送企微（--webhook）
   B  需求驱动：读 requirement（JSON 或 Markdown，可由 TAPD MCP 取回后写出）→ 需求覆盖度报告（需 --requirement，默认 docs/requirement.md，回退 requirement-demo.json）
-  C  持续巡检用：base==target 时为全量回归（实际由 cron-monitor 调用）
+  C  持续巡检用：base==target 时为全量回归（实际由 cron-monitor 调用，异常经企微推送）
 
 示例：
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A --diff report/.mcp-diff.txt
+  node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A --pr 123 --pr-project owner/repo --webhook https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
   node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --requirement sample-app/docs/requirement.md`);
   process.exit(0);
 }
@@ -116,6 +128,122 @@ function analyzeDiff(diffText) {
   else if (otherFiles.length && !srcFiles.length) scope = '配置/文档改动';
   else scope = `纯源码改动（${srcFiles.length} 个文件）`;
   return { changedFiles, changedFunctions, scope, srcFiles, testFiles, otherFiles };
+}
+
+// ---------- 1.5 AI 语义理解（LLM，可选；未配置则回退结构分析）----------
+// 这一步让「理解变更」真正由大模型完成：读懂改动意图、判断哪里可能出问题、
+// 可能影响哪些业务流程，并给出建议验证重点——弥补纯正则/导入图「读得浅、判断不深」的短板。
+// 聚焦 diff 到被测仓库子树（去掉 agent/、README、.codebuddy 等与 SUT 无关的噪声），
+// 避免超长 diff 让模型"读偏"导致语义理解失败。
+function focusDiffToRepo(diffText, repoDir) {
+  const marker = path.basename(repoDir) + '/';
+  const blocks = diffText.split(/\ndiff --git /).map((b, i) => (i === 0 ? b : 'diff --git ' + b));
+  const kept = blocks.filter((b) => b.includes(marker));
+  const focused = kept.join('\n').slice(0, 5000);
+  return focused || diffText.slice(0, 4000);
+}
+
+async function semanticAnalyze(diffText, structural) {
+  if (!isLLMEnabled()) return null;
+  const system = `你是一名资深测试架构师，服务于「AI 测试官」。请对下面的代码 diff 做语义级理解：真正读懂改动意图、判断哪里可能出问题、可能影响哪些业务流程，并给出建议验证重点。
+请先逐步思考（你会在回复中看到自己的思考轨迹），再【只输出一个 JSON 对象】，不要任何额外文字，结构：
+{
+  "intent": "一句话说明改动意图",
+  "riskLevel": "high|medium|low",
+  "riskAreas": ["可能受影响的代码区域"],
+  "businessFlows": ["可能受影响的业务流程"],
+  "recommendedFocus": ["建议重点验证的测试场景"],
+  "reasoning": "为什么这里可能出问题（2-4 句）"
+}`;
+  const user = `代码 diff（已聚焦到被测仓库）：\n${focusDiffToRepo(diffText, repoDir)}\n\n辅助结构分析（已由引擎提取）：\n${JSON.stringify({ changedFiles: structural.changedFiles, changedFunctions: structural.changedFunctions, scope: structural.scope })}`;
+  try {
+    const { content, reasoning } = await chat({
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      temperature: 0.2,
+      maxTokens: 1200,
+      model: fastModel(),
+    });
+    if (reasoning) console.log('   🧠 思考轨迹：' + reasoning.replace(/\s+/g, ' ').slice(0, 200));
+    // 思维链模型有时会把最终 JSON 放在 reasoning 中：content 与 reasoning 都尝试解析
+    const j = extractJSON(content) || extractJSON(reasoning);
+    if (!j || !j.intent) return null;
+    return j;
+  } catch (e) {
+    console.warn('⚠️ AI 语义分析失败，回退结构分析：', e.message);
+    return null;
+  }
+}
+
+// ---------- 2.5 AI 根因推理（单发 chat + 日志内联，可选；未配置则保留正则提取）----------
+// 失败用例的 rootCause 不再只靠正则，而是由模型结合 diff 摘要 + 真实失败日志/堆栈做语义归因（"为什么挂"）。
+// 不再走 ReAct 工具循环：失败日志引擎本就持有，直接内联进 prompt 即可，省去多轮 Act→Observe 的无效开销。
+
+// （Agent 实时日志已不再需要：根因/生成改为单发 chat，去掉 ReAct 工具循环）
+
+// 从首轮原始输出中抽取某个失败用例的完整日志片段（供 get_failure_log 工具使用）
+function getFailureLogFromRaw(raw, name) {
+  if (!raw) return '(无原始日志)';
+  const lines = raw.split(/\r?\n/);
+  const norm = (s) => s.replace(/（类型=[^）]*）/g, '').trim();
+  let idx = lines.findIndex((l) => l.includes(name));
+  if (idx < 0) idx = lines.findIndex((l) => l.includes(norm(name)));
+  if (idx < 0) {
+    // 退化：用用例名前缀做部分匹配（应对模型传入的命名微小差异）
+    const base = norm(name).slice(0, 12);
+    if (base) idx = lines.findIndex((l) => l.includes(base));
+  }
+  if (idx < 0) return `(未在原始日志中找到用例「${name}」)`;
+  return lines.slice(Math.max(0, idx - 4), idx + 50).join('\n');
+}
+
+// 构建注入 Agent 的领域上下文（闭包捕获引擎状态，避免把执行权限交给模型造成失控）
+function buildOfficerCtx({ repoDir, diffText, lastUnitRaw, sel }) {
+  const readRepoFile = (rel) => {
+    try {
+      return fs.readFileSync(path.resolve(repoDir, rel), 'utf8');
+    } catch {
+      return '';
+    }
+  };
+  return {
+    repoDir,
+    getDiff: () => diffText,
+    listTests: () => listAllTests(repoDir),
+    getFailureLog: (name) => getFailureLogFromRaw(lastUnitRaw, name),
+    expandScope: (files) => expandTests(repoDir, files, sel.testFiles).map((f) => path.relative(repoDir, f)),
+    getModuleSource: (rel) => readRepoFile(rel),
+    readTestFile: (rel) => readRepoFile(rel),
+  };
+}
+
+async function llmRootCause(diffText, failures, ctx) {
+  if (!isLLMEnabled() || !failures.length) return {};
+  // 失败日志引擎本就持有（来自首轮 runInWorktree 的原始输出），直接内联，避免让模型再走工具循环去取
+  const logs = failures.map((f) => {
+    const log = ctx.getFailureLog(f.name);
+    return `### ${f.name}\n类型=${f.type}\n现有线索=${String(f.rootCause).slice(0, 200)}\n日志/堆栈:\n${log.slice(0, 1200)}`;
+  }).join('\n---\n');
+  const system = `你是资深测试调试专家（AI 测试官·根因分析）。给定代码 diff 摘要与若干失败用例的真实日志/堆栈，请对每条失败用例做语义级根因分析（读懂"为什么挂"），只输出一个 JSON 对象：
+{ "causes": { "用例名": "语义根因（含可能触发条件，2-3 句）" } }
+无法判断的用例值为 "（无法判定，见原始日志）"。不要输出任何额外文字。`;
+  const user = `代码改动摘要：\n${String(diffText).slice(0, 3000)}\n\n失败用例与日志：\n${logs}`;
+  try {
+    const { content, reasoning } = await chat({
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      temperature: 0.2,
+      maxTokens: 1500,
+      model: fastModel(),
+    });
+    if (reasoning) console.log('   🧠 根因推理轨迹：' + reasoning.replace(/\s+/g, ' ').slice(0, 200));
+    const j = extractJSON(content) || extractJSON(reasoning);
+    return (j && j.causes) || {};
+  } catch (e) {
+    console.warn('⚠️ AI 根因分析失败，保留原始日志：', e.message);
+    return {};
+  }
 }
 
 // ---------- 2. 执行：在 worktree 真实跑测 ----------
@@ -295,7 +423,8 @@ async function runUiSmoke(sutInWt) {
   return uiResults;
 }
 
-async function runInWorktree(targetRef, testFiles) {
+async function runInWorktree(targetRef, testFiles, opts = {}) {
+  const { skipUnit = false, skipApi = false, skipUi = false } = opts;
   const wt = path.join(os.tmpdir(), `aio-${Date.now()}`);
   let testOut, smokeOut, uiOut = [];
   try {
@@ -306,19 +435,304 @@ async function runInWorktree(targetRef, testFiles) {
     const runTests = wtTestFiles.length ? wtTestFiles : globSync(path.join(sutInWt, 'tests', '*.test.js'));
     // 显式锁定 spec reporter：node:test 默认 reporter 受环境/版本影响，
     // 锁定后 parseNodeTest 才能稳定按 ✔/✖ 行解析，避免解析失败导致结果丢失
-    testOut = await run(sutInWt, 'node', ['--test', '--test-reporter=spec', ...runTests]);
-    smokeOut = await run(sutInWt, 'node', ['smoke/api-smoke.mjs']);
+    if (!skipUnit) testOut = await run(sutInWt, 'node', ['--test', '--test-reporter=spec', ...runTests]);
+    if (!skipApi) smokeOut = await run(sutInWt, 'node', ['smoke/api-smoke.mjs']);
     // 前端体验链路（可选）：失败或异常不影响后端闭环结果
-    try {
-      uiOut = await runUiSmoke(sutInWt);
-    } catch (e) {
-      uiOut = [{ name: '前端 UI 冒烟（Playwright）', type: 'ui', status: 'skip', severity: '-', rootCause: `UI 链路执行异常已忽略：${e.message}`, repro: 'playwright test smoke/ui-smoke.spec.js', testFile: 'ui-smoke.spec.js' }];
+    if (!skipUi) {
+      try {
+        uiOut = await runUiSmoke(sutInWt);
+      } catch (e) {
+        uiOut = [{ name: '前端 UI 冒烟（Playwright）', type: 'ui', status: 'skip', severity: '-', rootCause: `UI 链路执行异常已忽略：${e.message}`, repro: 'playwright test smoke/ui-smoke.spec.js', testFile: 'ui-smoke.spec.js' }];
+      }
     }
   } finally {
     // 无论成功或失败都清理 worktree，避免 detached 分支/工作树残留污染仓库
     await git(repoDir, 'worktree', 'remove', '--force', wt).catch(() => {});
   }
-  return { unit: parseNodeTest(testOut.out), api: parseApiSmoke(smokeOut.out), ui: uiOut };
+  return {
+    unit: skipUnit ? [] : parseNodeTest(testOut.out),
+    api: skipApi ? [] : parseApiSmoke(smokeOut.out),
+    ui: skipUi ? [] : uiOut,
+    // 保留原始输出：供 AI 测试官 Agent 的 get_failure_log 工具抽取失败用例完整日志/堆栈
+    raw: {
+      unit: skipUnit ? '' : (testOut?.out || ''),
+      api: skipApi ? '' : (smokeOut?.out || ''),
+      ui: skipUi ? '' : JSON.stringify(uiOut, null, 2),
+    },
+  };
+}
+
+// ---------- 4. 自适应策略（P1）：首轮失败后，根据结果动态调整后续策略 ----------
+// 不再是「固定流水线跑完即结束」：若首轮有失败，则①扩展选测（发现隐性影响面）②深度复跑确认（抓取完整根因）。
+// 决策由确定性启发式给出（有失败就扩展选测 + 深度复跑，永远安全、零风险）；仅当配置了独立「快模型」时，
+// 额外用其补一句决策旁白（判定类轻任务），推理模型不为一段旁白白花 23s。
+async function adaptiveDecision(failing) {
+  const decision = heuristicAdaptiveDecision(failing);
+  if (isLLMEnabled() && hasFastModel()) {
+    try {
+      const { content } = await chat({
+        messages: [
+          { role: 'system', content: '你是「AI 测试官」的测试策略指挥官。首轮测试出现失败，请用一句话说明后续自适应动作的理由（扩展选测以发现隐性影响面、深度复跑确认可复现）。只输出一句话，不要 JSON、不要解释。' },
+          { role: 'user', content: `失败用例（${failing.length} 个）：${failing.map((f) => f.name).join('、')}` },
+        ],
+        temperature: 0.2,
+        maxTokens: 200,
+        model: fastModel(),
+      });
+      const r = (content || '').trim();
+      if (r) decision.rationale = r;
+    } catch {
+      /* 旁白失败不影响决策 */
+    }
+  }
+  return decision;
+}
+
+function heuristicAdaptiveDecision(failing) {
+  const hasUnit = failing.some((f) => f.type === 'unit');
+  const hasApiUi = failing.some((f) => f.type === 'api' || f.type === 'ui');
+  return {
+    expandScope: hasUnit,
+    deepDive: hasUnit || hasApiUi,
+    rationale: '启发式：存在失败用例即触发扩展选测与深度复跑（离线模式）',
+  };
+}
+
+function resolveTestFile(repoDir, basename) {
+  if (!basename) return null;
+  const g = globSync(path.join(repoDir, 'tests', basename));
+  return g[0] || null;
+}
+
+// 执行自适应动作：返回 { decision, actions, extraResults, expandedTests }
+async function runAdaptive({ decision, failing, target, repoDir, originalRun }) {
+  const actions = [];
+  const extraResults = [];
+  const expandedTests = [];
+  const failUnitFiles = [...new Set(failing.filter((f) => f.type === 'unit' && f.testFile).map((f) => resolveTestFile(repoDir, f.testFile)).filter(Boolean))];
+
+  // 待跑集合：扩展选测发现的 + 需深度复跑的失败单测
+  const expandSet = decision.expandScope ? expandTests(repoDir, failUnitFiles, originalRun) : [];
+
+  // 动作1：扩展选测（发现隐性影响面）—— 跑的是首轮未覆盖的新测试，结果全部计入 extraResults
+  if (expandSet.length) {
+    expandedTests.push(...expandSet.map((f) => path.relative(repoDir, f)));
+    actions.push(`扩展选测 ${expandSet.length} 个隐性关联测试（${expandedTests.join(', ')}）`);
+    const { unit } = await runInWorktree(target, expandSet, { skipApi: true, skipUi: true });
+    extraResults.push(...unit);
+  }
+
+  // 动作2：深度复跑失败单测（仅确认可复现 + 抓完整根因，不新增结果，避免与首轮重复）
+  if (decision.deepDive && failUnitFiles.length) {
+    actions.push(`深度复跑 ${failUnitFiles.length} 个失败单测以确认可复现并抓取完整根因`);
+    const { unit } = await runInWorktree(target, failUnitFiles, { skipApi: true, skipUi: true });
+    for (const r of unit) {
+      const o = failing.find((x) => x.name === r.name);
+      if (o) {
+        if (r.status === 'fail' && r.rootCause && r.rootCause !== '-') o.rootCause = r.rootCause;
+        o.reproConfirmed = true;
+      }
+    }
+  }
+
+  // 深度复跑 API/UI 链路（确认非单测类失败可复现并抓全日志）。无论是否有单测失败都执行，
+  // 因为上面的 unit 组合跑已 skip 了 api/ui。
+  if (decision.deepDive && failing.some((f) => f.type === 'api' || f.type === 'ui')) {
+    const { api, ui } = await runInWorktree(target, [], { skipUnit: true });
+    for (const r of [...api, ...ui]) {
+      const o = failing.find((x) => x.name === r.name);
+      if (o && r.status === 'fail' && r.rootCause && r.rootCause !== '-') o.rootCause = r.rootCause;
+      if (o) o.reproConfirmed = true;
+    }
+    actions.push('复跑 API/UI 链路确认失败并抓取完整日志');
+  }
+
+  if (!actions.length) actions.push('失败用例已记录，无需额外自适应动作');
+  return { decision, actions, extraResults, expandedTests };
+}
+
+// ---------- 5. 测试生成 Agent（P2 · 根因暴露盲区时自动补写回归测试）----------
+// 设计（自洽、防幻觉）：LLM 只负责"读懂失败 + 写对 import + 断言正确行为"，
+// 真实运行与判定由引擎在 worktree 中完成；若生成测试在缺陷分支竟然通过（说明断言了缺陷行为）
+// 或运行报错，则把错误回灌给模型修复（最多 3 轮）。最终只保留"在缺陷分支失败=能抓住 bug"的测试。
+// 这样生成的测试是真实可运行的回归守卫，而非 demo 摆设。
+
+// 由失败单测反推其被测模块（同 stem 或 import 中指向 ../src）
+function moduleUnderTest(repoDir, testFileAbs) {
+  if (!testFileAbs) return null;
+  const b = path.basename(testFileAbs).replace(/\.(test|spec)\.[mc]?js$/, '').replace(/(^|[-_])test$/, '');
+  for (const c of [path.join(repoDir, 'src', b + '.js'), path.join(repoDir, 'src', b + '.mjs')]) {
+    try { if (fs.statSync(c).isFile()) return path.relative(repoDir, c); } catch {}
+  }
+  try {
+    const src = fs.readFileSync(testFileAbs, 'utf8');
+    const m = src.match(/from\s+['"]\.\.\/(src\/[^'"]+)['"]/);
+    if (m && fs.existsSync(path.resolve(repoDir, m[1]))) return m[1];
+  } catch {}
+  return null;
+}
+
+// 在 worktree 中落盘生成测试并真实运行，返回 pass/fail/error
+async function runGeneratedTest(targetRef, relTestPath, content) {
+  const wt = path.join(os.tmpdir(), `aio-gen-${Date.now()}`);
+  try {
+    await git(repoDir, 'worktree', 'add', '--detach', wt, targetRef);
+    const sutInWt = path.join(wt, path.relative(ROOT, repoDir));
+    const abs = path.join(sutInWt, relTestPath);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, content, 'utf8');
+    const res = await run(sutInWt, 'node', ['--test', '--test-reporter=spec', abs]);
+    const parsed = parseNodeTest(res.out);
+    const hasFail = parsed.some((r) => r.status === 'fail');
+    const hasPass = parsed.some((r) => r.status === 'pass');
+    return { status: hasFail ? 'fail' : hasPass || parsed.length ? 'pass' : 'error', out: res.out };
+  } catch (e) {
+    return { status: 'error', out: e.message };
+  } finally {
+    await git(repoDir, 'worktree', 'remove', '--force', wt).catch(() => {});
+  }
+}
+
+async function fixGen(system, prevAnswer, feedback) {
+  const { content } = await chat({
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: '（上一轮产出）\n' + prevAnswer },
+      { role: 'user', content: '❌ 反馈：' + feedback + '\n\n请重新只输出修正后的 JSON 对象（fileName/content/targetModule/asserts）。' },
+    ],
+    temperature: 0.2,
+    maxTokens: 2000,
+    model: fastModel(),
+  });
+  return content;
+}
+
+// ---------- 5. 测试生成 Agent（P2 · 根因暴露盲区时自动补写回归测试）----------
+// 设计（自洽、防幻觉）：LLM 只负责"读懂失败 + 写对 import + 断言正确行为"，
+// 真实运行与判定由引擎在 worktree 中完成；若生成测试在缺陷分支竟然通过（说明断言了缺陷行为）
+// 或运行报错，则把错误回灌给模型修复（最多 1 轮）。最终只保留"在缺陷分支失败=能抓住 bug"的测试。
+// 关键提速：失败日志/被测源码/同目录测试 引擎本就持有，直接内联进 prompt（不再走 ReAct 工具循环）；
+// 多个候选用例并行生成（Promise.all），每个仅 1 次草稿 + 最多 1 次修复。
+async function generateRegressionTests({ target, failing, ctx }) {
+  const out = [];
+  if (!isLLMEnabled() || !failing.length) return out;
+  const candidates = failing.filter((f) => f.type === 'unit' && f.testFile).slice(0, 2);
+  if (!candidates.length) return out;
+
+  const jobs = candidates.map(async (f) => {
+    const moduleRel = moduleUnderTest(repoDir, path.resolve(repoDir, 'tests', f.testFile));
+    const moduleSrc = moduleRel ? ctx.getModuleSource(moduleRel) : '';
+    const testSrc = ctx.readTestFile(path.join('tests', f.testFile));
+    const system = `你是「AI 测试官」的测试生成 Agent。给定一条失败用例、其真实日志、被测模块源码、以及同目录已有测试的风格，请生成一个【新的回归测试文件】（node:test 形式），用于把"正确预期行为"锁死。
+要求：
+- 必须 import 被测模块的真实导出（见下方「被测模块源码」确认导出名与签名），再做断言。
+- 断言【正确预期】而非缺陷行为：该测试在【当前缺陷分支】应当失败（证明它能抓住这个 bug），在修复后应通过。
+- 参考「同目录已有测试」的风格。
+- 只输出一个 JSON 对象：{"fileName": "generated-<简短slug>.test.js", "targetModule": "src/xxx.js", "asserts": "一句话说明它锁定的正确行为", "content": "完整可运行的测试文件源码（含 import 与 node:test 的 test()）"}。`;
+    const user = `失败用例：${f.name}
+已有线索（rootCause）：${String(f.rootCause).slice(0, 400)}
+被测模块（推测）：${moduleRel || '未知'}
+失败日志/堆栈：
+${ctx.getFailureLog(f.name).slice(0, 1500)}
+${moduleRel && moduleSrc ? `\n被测模块源码（${moduleRel}）：\n${moduleSrc.slice(0, 3000)}` : ''}
+${testSrc ? `\n同目录已有测试（${f.testFile}）参考：\n${testSrc.slice(0, 2000)}` : ''}
+请只输出上述 JSON。`;
+
+    let last;
+    try {
+      const r = await chat({ messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0.2, maxTokens: 2000, model: fastModel() });
+      last = r.content;
+      if (r.reasoning) console.log('   🧠 测试生成推理：' + r.reasoning.replace(/\s+/g, ' ').slice(0, 160));
+    } catch (e) {
+      return { name: f.name, status: 'error', note: '生成调用失败：' + e.message };
+    }
+
+    let result = null;
+    for (let attempt = 0; attempt < 2 && !result; attempt++) {
+      const gen = extractJSON(last) || {};
+      const content = gen.content;
+      const fileName = (gen.fileName || `generated-${String(f.name).slice(0, 20).replace(/\W+/g, '-')}.test.js`).replace(/"/g, '');
+      if (!content || !/node:test|import/.test(content)) {
+        last = await fixGen(system, last, '生成的 JSON 缺少可用的 content（测试源码），或没有 import node:test，请补全一个完整可运行的测试文件源码。');
+        continue;
+      }
+      const runRes = await runGeneratedTest(target, path.join('tests', fileName), content);
+      if (runRes.status === 'fail') {
+        // 验证通过：在缺陷分支确实失败（能抓住 bug）→ 落盘为仓库内真实可复跑的回归守卫
+        fs.mkdirSync(path.join(repoDir, 'tests'), { recursive: true });
+        const dest = path.join(repoDir, 'tests', fileName);
+        fs.writeFileSync(dest, content, 'utf8');
+        result = { name: f.name, fileName, targetModule: gen.targetModule || moduleRel || '', asserts: gen.asserts || '', status: 'reproduced', content, path: path.relative(repoDir, dest) };
+        console.log(`   🧪 生成回归测试 ${fileName}：缺陷分支失败 ✓（已写入 ${path.relative(ROOT, dest)} 作为回归守卫）`);
+      } else if (runRes.status === 'pass') {
+        last = await fixGen(system, last, `生成的测试在【缺陷分支】竟然通过了，说明它在断言缺陷行为而不是正确行为。请改为断言【正确预期】，使其在缺陷分支应当失败（作为回归守卫）。运行输出：\n${runRes.out.slice(0, 1000)}`);
+      } else {
+        last = await fixGen(system, last, `测试运行出错（语法/导入/路径问题），请修正使其可在 node --test 下运行：\n${runRes.out.slice(0, 1400)}`);
+      }
+    }
+    return result || { name: f.name, status: 'error', note: '修复后仍无法生成可运行且能复现 bug 的测试' };
+  });
+
+  return Promise.all(jobs);
+}
+
+// ---------- 6. 场景 B AI 覆盖度语义判定（P2 · 防幻觉的"事实由引擎测、语义由 LLM 判"）----------
+// 关键设计：模块是否存在、测试是否运行、结果如何——这些事实全部由引擎实测并作为证据喂给 LLM；
+// LLM 只做"语义判断"：给定测试是否真的验证了需求点意图（testAdequacy）。
+// 确定性 status 仍是权威徽章；LLM 的 verdict 仅在一致时强化，不一致时作为"AI 提示"并列展示，绝不臆造事实。
+function gatherCoverageEvidence(req, results, repoDir) {
+  return req.points.map((pt) => {
+    const impl = probeImplementation(repoDir, pt.module);
+    const tFiles = testsForModule(repoDir, pt.module).map((f) => path.basename(f));
+    const tResults = results.filter((r) => tFiles.includes(r.testFile));
+    // 只给"事实证据"：模块是否存在/是否桩、关联测试的实测结果与状态。
+    // 不给大段源码（避免触发模型长链思维耗光 token 而吐不出 JSON；充分性判断靠测试名+状态+需求描述即可，且避免过拟合）。
+    return {
+      id: pt.id,
+      desc: pt.desc,
+      module: pt.module,
+      impl: { exists: impl.exists, hasImpl: impl.hasImpl, codeLines: impl.codeLines },
+      testResults: tResults.map((r) => ({ name: r.name, status: r.status })),
+    };
+  });
+}
+
+async function llmCoverageJudge(evidence) {
+  if (!isLLMEnabled() || !evidence.length) return null;
+  // 注意：该推理模型会把大量 token 花在链思维上，必须把提示压到"只输出 JSON"，否则会吐不出 JSON。
+  const system = `你是测试覆盖度语义评审。输入是若干"需求点 + 引擎实测证据（模块是否存在、是否疑似桩、关联测试实测结果与状态）"。
+规则：
+- verdict 必须与证据严格一致：模块不存在→missing；模块疑似桩→stub；关联测试有失败→fail；有实现但无关联测试→untested；有关联测试且全通过→pass。
+- testAdequacy：strong（测试名/结果表明确实验证了该需求点意图）/ weak（仅浅层验证或无法确认）/ none。
+- reasoning：每点 1 句话依据；gap：若 verdict≠pass 或 testAdequacy≠strong 则给缺口，否则空串。
+禁止任何分析文字，直接输出 JSON 数组，格式：[{"pointId":"P1","verdict":"pass","testAdequacy":"strong","confidence":"high|medium|low","reasoning":"...","gap":""}]`;
+  const user = JSON.stringify(evidence);
+  try {
+    const { content, reasoning } = await chat({ messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0.2, maxTokens: 6000, model: fastModel() });
+    if (reasoning) console.log('   🧠 覆盖度判定：' + reasoning.replace(/\s+/g, ' ').slice(0, 160));
+    const arr = extractJSON(content) || extractJSON(reasoning);
+    return Array.isArray(arr) ? arr : null;
+  } catch (e) {
+    console.warn('⚠️ AI 覆盖度判定失败，沿用确定性结果：', e.message);
+    return null;
+  }
+}
+
+async function llmRequirementAudit(reqText, points) {
+  if (!isLLMEnabled()) return null;
+  const system = `你是需求拆解审计。给定需求文档文本与已结构化解析出的"测试点"列表，请：
+1. 列出该需求隐含的、应当被测试的能力点（impliedCapabilities）。
+2. 对比已解析测试点，指出文档提到但测试点未覆盖的能力（missingFromPoints）。
+禁止任何分析文字，直接输出 JSON：{"impliedCapabilities":["..."],"missingFromPoints":[{"desc":"未覆盖能力","why":"为何重要"}]}`;
+  const user = `需求文档：\n${reqText}\n\n已解析测试点：\n${points.map((p) => `${p.id}: ${p.desc}（模块：${p.module || '未指定'}）`).join('\n')}`;
+  try {
+    const { content, reasoning } = await chat({ messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0.2, maxTokens: 2000, model: fastModel() });
+    const j = extractJSON(content) || extractJSON(reasoning);
+    return j && Array.isArray(j.impliedCapabilities) ? j : null;
+  } catch (e) {
+    console.warn('⚠️ AI 需求审计失败：', e.message);
+    return null;
+  }
 }
 
 // ---------- 3. 报告 ----------
@@ -490,14 +904,34 @@ function computeCoverage(req, results, repoDir) {
 }
 
 // 统一生成「AI 测试官过程时间线」，供 HTML 可视化（不依赖业务语义）
-function buildProcess({ scenario, req, impact, sel, summary }) {
+function buildProcess({ scenario, req, impact, sel, summary, adaptive, generatedTests = [] }) {
   const phases = [];
   if (scenario === 'B') {
     phases.push({ title: '① 读需求/缺陷', detail: `${req.id} · ${req.title}`, status: 'done' });
     phases.push({ title: '② 拆解测试点', detail: `${req.points.length} 个测试点 / 命中 ${impact.srcFiles.length} 个模块`, status: 'done' });
+    if (impact.aiCoverage) phases.push({ title: '③ AI 覆盖度语义判定', detail: '引擎实测证据 + LLM 语义评审（含测试充分性）', status: 'done' });
   } else {
-    phases.push({ title: '① 理解变更', detail: impact.diffSource || `git diff ${base}..${target}`, status: 'done' });
-    phases.push({ title: '② 影响面分析', detail: impact.changedFiles.join(', ') || '（无改动）', status: 'done' });
+    const u = impact.llmUnderstand;
+    phases.push({
+      title: u ? '① 理解变更（AI 语义分析）' : '① 理解变更',
+      detail: u
+        ? `${u.intent}（风险 ${u.riskLevel}）`
+        : (impact.diffSource || `git diff ${base}..${target}`),
+      status: 'done',
+    });
+    const impactDetail = u && Array.isArray(u.businessFlows) && u.businessFlows.length
+      ? `${impact.changedFiles.join(', ') || '（无改动）'} ｜ AI 提示影响：${u.businessFlows.join('、')}`
+      : (impact.changedFiles.join(', ') || '（无改动）');
+    phases.push({ title: '② 影响面分析', detail: impactDetail, status: 'done' });
+  }
+  if (impact && impact.reactPlan) {
+    const rp = impact.reactPlan;
+    const extra = (rp.addedTests?.length ? `补选 ${rp.addedTests.length} 个` : '') + (rp.blindSpots?.length ? ` ｜ 盲区 ${rp.blindSpots.length} 处` : '');
+    phases.push({
+      title: '②→ ReAct 整体规划',
+      detail: `核心风险：${rp.focus || '—'}${extra ? ' ｜ ' + extra : ''}`,
+      status: 'done',
+    });
   }
   phases.push({
     title: '③ 选测策略',
@@ -509,13 +943,228 @@ function buildProcess({ scenario, req, impact, sel, summary }) {
     detail: `通过 ${summary.pass} / 失败 ${summary.fail}`,
     status: summary.fail > 0 ? 'warn' : 'done',
   });
-  phases.push({ title: '⑤ 生成可决策报告', detail: 'report/index.html', status: 'done' });
+  // 自适应策略（P1）：首轮出现失败时动态扩展选测 / 深度复跑，体现「根据中间结果调整策略」
+  if (adaptive && adaptive.actions && adaptive.actions.length) {
+    const detail = `决策：${adaptive.decision?.rationale || ''} ｜ ${adaptive.actions.join('；')}`;
+    phases.push({ title: '⑤ 自适应策略（失败驱动）', detail, status: 'done' });
+  }
+  if (generatedTests && generatedTests.length) {
+    const ok = generatedTests.filter((g) => g.status === 'reproduced').length;
+    phases.push({ title: '⑦ AI 生成回归测试', detail: `${generatedTests.length} 个候选 / ${ok} 个在缺陷分支可复现 bug`, status: 'done' });
+  }
+  phases.push({ title: '⑥ 生成可决策报告', detail: 'report/index.html', status: 'done' });
   return phases;
 }
 
+// ---------- ReAct 整体规划（问题3）：用真正的 Agent 循环自主规划"测什么/顺序/是否含 UI" ----------
+// 与确定性 selectTests 的关系：selectTests 给出"结构可达"的候选集（导入图/同名），
+// ReAct Agent 则从"改动语义 + 业务风险"出发，判断这些候选里【哪些最该先测、是否要含 UI、有无遗漏】，
+// 产出一份"测试计划"，其建议的测试文件与结构选测取并集。自主性从"局部决策"升级为"整体策略规划"。
+async function planWithReActAgent({ repoDir, diffText, impact, sel, officerCtx }) {
+  if (!isLLMEnabled() || !hasFastModel()) return null;
+
+  const tools = makeOfficerTools({ ...officerCtx, repoDir });
+  const system = `你是「AI 测试官」的首席规划 Agent。你的职责不是执行测试，而是【规划测试策略】。
+你会拿到一次代码改动，需要通过工具观察"改了什么、有哪些可运行测试"，然后自主决定：
+  1. 本次改动最该优先验证的核心风险点是什么；
+  2. 从现有测试文件中，挑选出必须运行的子集（给相对路径）；
+  3. 是否需要包含前端 UI 冒烟（ui 类）与 API 冒烟；
+  4. 有无"改动涉及但现有测试未覆盖"的隐性盲区。
+
+规则：
+- 必须先调用 get_diff 与 list_test_files 观察事实，再下结论，不要凭空臆测。
+- 最终答复用 JSON（且只输出 JSON），结构：
+  {"focus":"一句话核心风险","mustRunTests":["tests/xxx.test.js", ...],"includeUi":true|false,"includeApi":true|false,"blindSpots":["..."],"rationale":"为何这样规划"}
+- mustRunTests 只能来自 list_test_files 返回的真实相对路径。`;
+
+  const task = `本次改动文件：${impact.changedFiles.join(', ') || '(无)'}
+改动函数（结构分析）：${impact.changedFunctions.join(', ') || '(无)'}
+结构选测已给出候选：${sel.testFiles.map((f) => path.relative(repoDir, f)).join(', ') || '(无)'}
+请先用工具观察真实 diff 与全部可运行测试，再给出你的测试计划（JSON）。`;
+
+  let plan = null;
+  const trace = [];
+  try {
+    const res = await runAgent({
+      system,
+      task,
+      tools,
+      maxSteps: 6,
+      model: fastModel(),
+      temperature: 0,
+      maxTokens: 1200,
+      onStep: (s) => {
+        if (s.type === 'reason') trace.push({ kind: 'think', text: String(s.text).slice(0, 400) });
+        else if (s.type === 'action') trace.push({ kind: 'act', tool: s.tool, args: s.args });
+        else if (s.type === 'answer') trace.push({ kind: 'answer', text: String(s.text).slice(0, 400) });
+      },
+    });
+    plan = extractJSON(res.answer);
+    if (plan) plan._trace = trace;
+  } catch {
+    return null;
+  }
+  if (!plan || typeof plan !== 'object') return null;
+
+  // 把 Agent 建议的测试文件解析成 repoDir 下的绝对路径，仅收真实存在且 node 可跑的（避免把 .spec.js 错塞给 node --test）
+  const suggestedAbs = [];
+  for (const rel of Array.isArray(plan.mustRunTests) ? plan.mustRunTests : []) {
+    const abs = path.isAbsolute(rel) ? rel : path.resolve(repoDir, rel);
+    if (fs.existsSync(abs) && isRunnableTest(abs)) suggestedAbs.push(abs);
+  }
+  // 与结构选测取并集（去重）
+  const merged = Array.from(new Set([...sel.testFiles, ...suggestedAbs]));
+  const added = merged.filter((f) => !sel.testFiles.includes(f)).map((f) => path.relative(repoDir, f));
+  plan._addedTests = added;
+  plan._mergedTests = merged;
+  return plan;
+}
+
+// ---------- PR/MR 自动回写闭环（问题2）：跑完 → 在工蜂(TGit) MR 下评论测试结果 ----------
+// 有 TGIT_TOKEN + --pr <iid> 时经工蜂 REST API 真实回写；否则优雅降级为写 report/pr-comment.md（dry-run），
+// 与现有 webhook 风格一致，保证离线 Demo 不受影响。
+function buildPRComment({ report, reportUrl }) {
+  const s = report.summary;
+  const passRate = s.total ? Math.round((s.pass / s.total) * 100) : 0;
+  const icon = s.fail > 0 ? '🔴' : '🟢';
+  const lines = [];
+  lines.push(`## ${icon} AI 测试官 · 自动化验证报告`);
+  lines.push('');
+  lines.push(`**结论**：通过 ${s.pass} / 失败 ${s.fail}（通过率 ${passRate}%）`);
+  if (report.impact?.llmUnderstand) {
+    const u = report.impact.llmUnderstand;
+    lines.push(`**AI 语义理解**：意图=${u.intent} ｜ 风险=${u.riskLevel}`);
+  }
+  const failed = (report.results || []).filter((r) => r.status === 'fail');
+  if (failed.length) {
+    lines.push('');
+    lines.push('**失败用例与根因：**');
+    for (const r of failed.slice(0, 8)) {
+      lines.push(`- \`${r.name}\`：${String(r.rootCause || r.message || '').slice(0, 160)}`);
+    }
+  }
+  const repro = (report.generatedTests || []).filter((g) => g.status === 'reproduced');
+  if (repro.length) {
+    lines.push('');
+    lines.push(`**AI 生成回归测试**：${repro.length} 个已在缺陷分支复现 bug，已作为回归守卫写入（点击文件名跳转仓库查看）：`);
+    for (const g of repro) {
+      const rel = String(g.path || g.fileName || '').replace(/\\/g, '/');
+      lines.push(`- [\`${g.name}\`](${rel}) → 回归守卫 \`${rel}\``);
+    }
+  }
+  if (reportUrl) {
+    lines.push('');
+    lines.push(`📊 完整报告：${reportUrl}`);
+  }
+  lines.push('');
+  lines.push('_由 AI 测试官自动生成_');
+  return lines.join('\n');
+}
+
+// 定位工蜂项目：优先 --pr-project owner/repo，否则从 git remote.origin.url 推断（供 diff 拉取与 MR 评论复用）
+function resolveTGitProject() {
+  let project = args['pr-project'];
+  if (!project || project === true) {
+    try {
+      const remote = execSync('git config --get remote.origin.url', { cwd: repoDir }).toString().trim();
+      const m = remote.match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/);
+      if (m) project = m[1];
+    } catch {}
+  }
+  return project || '';
+}
+
+// 经工蜂 REST API 拉取真实 MR 改动（MCP gongfeng 的真实落地点：脚本直连，不依赖宿主编排）。
+// changes 接口按文件返回 diff，拼接为统一 diff 文本供 analyzeDiff 解析；失败抛错交由调用方回退。
+async function fetchTGitMRDiff({ project, iid, token, apiBase }) {
+  const encProj = encodeURIComponent(project);
+  const url = `${apiBase}/projects/${encProj}/merge_requests/${iid}/changes`;
+  const resp = await fetch(url, { headers: { 'PRIVATE-TOKEN': token } });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json().catch(() => ({}));
+  const changes = Array.isArray(data.changes) ? data.changes : [];
+  const text = changes.map((c) => c.diff || '').filter(Boolean).join('\n');
+  if (!text.trim()) throw new Error('MR 无 diff 内容');
+  return text;
+}
+
+async function commentToPR({ report }) {
+  const prIid = args.pr;
+  if (!prIid || prIid === true) return; // 未指定 --pr 则不启用 PR 回写
+  const body = buildPRComment({ report, reportUrl: 'report/index.html' });
+  const token = process.env.TGIT_TOKEN || process.env.GIT_TOKEN || '';
+  const project = resolveTGitProject();
+  const apiBase = process.env.TGIT_API_BASE || 'https://git.woa.com/api/v3';
+  if (!token || !project) {
+    // 优雅降级：写本地 dry-run 评论文件，Demo 可展示"闭环意图"且不依赖网络/凭据
+    const out = path.join(ROOT, 'report', 'pr-comment.md');
+    fs.writeFileSync(out, body, 'utf8');
+    console.log(`💬 PR 回写（dry-run，未配置 TGIT_TOKEN/项目）：已写 ${out}`);
+    return;
+  }
+
+  try {
+    const encProj = encodeURIComponent(project);
+    const url = `${apiBase}/projects/${encProj}/merge_requests/${prIid}/notes`;
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'PRIVATE-TOKEN': token },
+      body: JSON.stringify({ body }),
+    });
+    if (resp.ok) {
+      console.log(`💬 PR 回写成功：已在 ${project} !${prIid} 评论测试结果`);
+    } else {
+      const t = await resp.text().catch(() => '');
+      const out = path.join(ROOT, 'report', 'pr-comment.md');
+      fs.writeFileSync(out, body, 'utf8');
+      console.log(`💬 PR 回写失败（HTTP ${resp.status}），已降级写 ${out}：${t.slice(0, 120)}`);
+    }
+  } catch (e) {
+    const out = path.join(ROOT, 'report', 'pr-comment.md');
+    fs.writeFileSync(out, body, 'utf8');
+    console.log(`💬 PR 回写异常（${e.message}），已降级写 ${out}`);
+  }
+}
+
+// ---------- 企微机器人真实推送（闭环收口：跑完 → 实时推送给值班/开发）----------
+// 配置 --webhook <url> 或 WEBHOOK_URL 时经企微机器人 webhook 真实推送（与 cron-monitor 同协议）；否则跳过，保持离线零依赖。
+// 企微 markdown 正文限制 4096 字节，超长截断以免推送被拒；推送失败/异常时降级落盘 report/.officer-last-message.md。
+async function pushToWeChat({ report }) {
+  const webhook = args.webhook || process.env.WEBHOOK_URL || '';
+  if (!webhook || webhook === true) return;
+  const content = buildPRComment({ report, reportUrl: 'report/index.html' });
+  const md = content.length > 4000 ? content.slice(0, 4000) + '\n…(正文过长已截断)' : content;
+  try {
+    const resp = await fetch(webhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msgtype: 'markdown', markdown: { content: md } }),
+    });
+    const j = await resp.json().catch(() => ({}));
+    if (resp.ok && (j.errcode === 0 || j.errcode === undefined)) {
+      console.log('📲 企微推送成功：测试报告已实时推送给值班/开发');
+    } else {
+      console.log(`📲 企微推送失败 HTTP ${resp.status} ${JSON.stringify(j)}（已降级写 report/.officer-last-message.md）`);
+      fs.writeFileSync(path.join(ROOT, 'report', '.officer-last-message.md'), content, 'utf8');
+    }
+  } catch (e) {
+    console.log('📲 企微推送异常：' + e.message + '（已降级写 report/.officer-last-message.md）');
+    fs.writeFileSync(path.join(ROOT, 'report', '.officer-last-message.md'), content, 'utf8');
+  }
+}
+
 async function main() {
+  const WALL0 = Date.now();
+  const perf = () => `⏱ 性能：wall ${((Date.now() - WALL0) / 1000).toFixed(1)}s ｜ LLM ${_llmStats.calls} 次调用累计 ${(_llmStats.ms / 1000).toFixed(1)}s`;
   const outName = args.out || 'report';
   const reportJsonPath = path.join(ROOT, 'report', `${outName}.json`);
+
+  // 预热快模型代理：首次调用常因代理冷启动慢 10~30s。这里在后台提前发一个极小请求，
+  // 与后续的 git 解析 / 选测 / 首轮跑测（约 30s）并行，避免冷启动落在关键路径上。
+  if (isLLMEnabled() && hasFastModel()) {
+    chat({ model: fastModel(), maxTokens: 8, temperature: 0, messages: [{ role: 'user', content: 'ping' }], stats: false }).catch(() => {});
+  }
+
 
   // --- 场景 B：需求驱动（离线读取 fixture，复用通用选测引擎）---
   if (scenario === 'B') {
@@ -542,12 +1191,67 @@ async function main() {
     console.log(`📋 场景 B · 需求 ${req.id}（${req.points.length} 测试点）→ 关联 ${sel.testFiles.length} 个测试`);
 
     console.log('🧪 执行验证（worktree 真实跑测）…');
-    const { unit, api, ui } = await runInWorktree(target, sel.testFiles);
+    const run1B = await runInWorktree(target, sel.testFiles);
+    const { unit, api, ui } = run1B;
     const results = [...unit, ...api, ...ui];
+    const officerCtxB = buildOfficerCtx({ repoDir, diffText: '', lastUnitRaw: run1B.raw.unit, sel });
+    // AI 根因推理（场景 B 同样适用：单发 chat + 日志内联，结合失败日志重写 rootCause）
+    const failingB = results.filter((r) => r.status === 'fail');
+    if (failingB.length) {
+      const causesB = await llmRootCause('', failingB, officerCtxB);
+      for (const r of failingB) if (causesB[r.name]) r.rootCause = causesB[r.name];
+    }
+
+    // ---------- 自适应策略（P1）：确定性决策 + 可选快模型旁白 ----------
+    let adaptiveB = null;
+    if (failingB.length) {
+      const decisionB = await adaptiveDecision(failingB);
+      adaptiveB = await runAdaptive({ decision: decisionB, failing: failingB, target, repoDir, originalRun: sel.testFiles });
+      if (adaptiveB.extraResults.length) results.push(...adaptiveB.extraResults);
+      const firstFailNamesB = new Set(failingB.map((f) => f.name));
+      const newFailingB = results.filter((r) => r.status === 'fail' && !firstFailNamesB.has(r.name));
+      if (newFailingB.length) {
+        const causesB2 = await llmRootCause('', newFailingB, officerCtxB);
+        for (const r of newFailingB) if (causesB2[r.name]) r.rootCause = causesB2[r.name];
+      }
+      console.log(`🔄 自适应策略：${decisionB.rationale} ｜ ${adaptiveB.actions.join('；')}`);
+    }
+
+    // ---------- AI 测试生成（根因暴露盲区时，自动补写能复现 bug 的回归测试）----------
+    let generatedTests = [];
+    if (isLLMEnabled()) {
+      generatedTests = await generateRegressionTests({ target, failing: failingB, ctx: officerCtxB });
+      if (generatedTests.length) console.log(`🧪 AI 生成回归测试：${generatedTests.filter((g) => g.status === 'reproduced').length} 个在缺陷分支可复现 bug`);
+    }
+
     const coverage = computeCoverage(req, results, repoDir);
     const covered = coverage.filter((c) => c.status === 'pass').length;
     const gaps = coverage.filter((c) => ['missing', 'stub', 'untested'].includes(c.status)).length;
     const failingPts = coverage.filter((c) => c.status === 'fail').length;
+
+    // ---------- AI 覆盖度语义判定（事实由引擎测、语义由 LLM 判；覆盖度判定 ∥ 需求审计并行）----------
+    let aiSuggestedPoints = [];
+    if (isLLMEnabled()) {
+      const evidence = gatherCoverageEvidence(req, results, repoDir);
+      const reqText = readTextRobust(reqPath);
+      const [aiCov, aiAudit] = await Promise.all([
+        llmCoverageJudge(evidence),
+        llmRequirementAudit(reqText, req.points),
+      ]);
+      if (Array.isArray(aiCov)) {
+        const map = new Map(aiCov.map((x) => [x.pointId, x]));
+        for (const c of coverage) {
+          const a = map.get(c.id);
+          if (a) c.ai = { verdict: a.verdict, testAdequacy: a.testAdequacy, confidence: a.confidence, reasoning: a.reasoning, gap: a.gap };
+        }
+        console.log(`   🤖 AI 覆盖度判定：${coverage.filter((c) => c.ai).length} 个测试点已加语义评审`);
+      }
+      if (aiAudit && aiAudit.missingFromPoints && aiAudit.missingFromPoints.length) {
+        aiSuggestedPoints = aiAudit.missingFromPoints;
+        console.log(`   🤖 AI 需求审计：发现 ${aiSuggestedPoints.length} 个文档提及但测试点未覆盖的能力`);
+      }
+      impact.aiCoverage = true;
+    }
 
     const plan = [
       { step: `读需求文档 ${req.id}`, why: '拆解测试点，明确应验证的能力' },
@@ -556,29 +1260,70 @@ async function main() {
       { step: '跑 API 端到端冒烟', why: '真实 API 端到端验证核心下单链路' },
       { step: '产出需求覆盖度报告', why: `已覆盖 ${covered} / 缺口 ${gaps} / 不达标 ${failingPts}` },
     ];
+    if (adaptiveB && adaptiveB.actions.length) {
+      plan.push({
+        step: `自适应扩展/复跑（${adaptiveB.expandedTests.length} 个新测试）`,
+        why: `首轮失败触发：${adaptiveB.decision?.rationale || ''}`,
+      });
+    }
     const report = {
-      meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString() },
+      meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
       impact,
       plan,
       results,
       coverage,
-      process: buildProcess({ scenario, req, impact, sel, summary: summarize(results) }),
+      adaptive: adaptiveB,
+      aiSuggestedPoints,
+      generatedTests,
+      process: buildProcess({ scenario, req, impact, sel, summary: summarize(results), adaptive: adaptiveB, generatedTests }),
       summary: summarize(results),
     };
     fs.writeFileSync(reportJsonPath, JSON.stringify(report, null, 2), 'utf8');
     console.log(`📝 已写 ${reportJsonPath}`);
     await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
     console.log(`\n✅ 场景 B 完成：覆盖 ${covered} / 缺口 ${gaps} / 不达标 ${failingPts}`);
+    console.log(perf());
     return;
   }
 
   // --- 场景 A / C：代码改动驱动（或 base=target 全量回归）---
-  const diffText = diffFile
-    ? readTextRobust(path.resolve(ROOT, diffFile))
-    : await git(repoDir, 'diff', `${base}..${target}`);
-  console.log(`🔍 理解变更：${diffFile ? `(来自外部 diff 文件 ${diffFile})` : `${base}..${target}`}`);
+  // diff 来源优先级：--diff 外部文件 > 工蜂真实 MR diff（--pr + TGIT_TOKEN，直连 REST）> 本地 git diff
+  const tgitToken = process.env.TGIT_TOKEN || process.env.GIT_TOKEN || '';
+  const tgitApiBase = process.env.TGIT_API_BASE || 'https://git.woa.com/api/v3';
+  let diffText, diffSource;
+  if (diffFile) {
+    diffText = readTextRobust(path.resolve(ROOT, diffFile));
+    diffSource = `MCP/外部 diff 文件：${diffFile}`;
+  } else if (args.pr && args.pr !== true && tgitToken) {
+    const project = resolveTGitProject();
+    if (project) {
+      try {
+        diffText = await fetchTGitMRDiff({ project, iid: args.pr, token: tgitToken, apiBase: tgitApiBase });
+        diffSource = `TGit 真实 MR diff（!${args.pr} @ ${project}）`;
+        fs.writeFileSync(path.join(ROOT, 'report', '.mcp-diff.txt'), diffText, 'utf8');
+        console.log(`   🌐 已从工蜂拉取真实 MR diff（${project} !${args.pr}），落盘 report/.mcp-diff.txt`);
+      } catch (e) {
+        console.warn(`⚠️ TGit 真实 diff 拉取失败（${e.message}），回退本地 git diff`);
+        diffText = await git(repoDir, 'diff', `${base}..${target}`, '--', '.');
+        diffSource = `git diff ${base}..${target}（TGit 拉取失败回退）`;
+      }
+    } else {
+      diffText = await git(repoDir, 'diff', `${base}..${target}`, '--', '.');
+      diffSource = `git diff ${base}..${target}（无法定位工蜂项目，回退）`;
+    }
+  } else {
+    // 注意：被测仓库 sample-app 在本工作区是 HACK 仓库的子目录（无独立 .git），
+    // 直接 `git diff base..target` 会作用到整个 HACK 仓库、混入 agent/README 等无关改动并触发全量回退。
+    // 用 `-- .` 把 diff 限定到 cwd（sample-app）子树，只关注被测代码改动。
+    diffText = await git(repoDir, 'diff', `${base}..${target}`, '--', '.');
+    diffSource = `git diff ${base}..${target}`;
+  }
+  console.log(`🔍 理解变更：${diffSource}`);
   const impact = analyzeDiff(diffText);
-  impact.diffSource = diffFile ? `MCP/外部 diff 文件：${diffFile}` : `git diff ${base}..${target}`;
+  impact.diffSource = diffSource;
+  impact.aiEnabled = isLLMEnabled();
+  // AI 语义理解：纯展示、失败即无；用快模型且与后续跑测并行，不阻塞主链路
+  const semanticP = isLLMEnabled() ? semanticAnalyze(diffText, impact).catch(() => null) : Promise.resolve(null);
   console.log(`   改动文件：${impact.changedFiles.join(', ') || '(无)'}`);
   console.log(`   改动函数：${impact.changedFunctions.join(', ') || '(无)'}`);
 
@@ -590,24 +1335,114 @@ async function main() {
   impact.selectionReason = sel.reason;
   console.log(`   ${sel.narrowed ? '🎯 精准选测' : '⚠️ 全量回退'}：${sel.reason}`);
 
-  console.log('🧪 执行验证（worktree 真实跑测）…');
-  const { unit, api, ui } = await runInWorktree(target, sel.testFiles);
-  const results = [...unit, ...api, ...ui];
+  // ---------- ReAct 整体规划（问题3）：Agent 自主观察 diff/测试集，规划"测什么/顺序/是否含 UI"，与结构选测取并集 ----------
+  const officerCtxPlan = buildOfficerCtx({ repoDir, diffText, lastUnitRaw: '', sel });
+  const reactPlan = await planWithReActAgent({ repoDir, diffText, impact, sel, officerCtx: officerCtxPlan });
+  let runTests = sel.testFiles;
+  if (reactPlan) {
+    runTests = reactPlan._mergedTests && reactPlan._mergedTests.length ? reactPlan._mergedTests : sel.testFiles;
+    impact.reactPlan = {
+      focus: reactPlan.focus,
+      includeUi: reactPlan.includeUi,
+      includeApi: reactPlan.includeApi,
+      blindSpots: reactPlan.blindSpots || [],
+      rationale: reactPlan.rationale,
+      addedTests: reactPlan._addedTests || [],
+      trace: reactPlan._trace || [],
+    };
+    console.log(`   🧭 ReAct 规划：核心风险=${reactPlan.focus || '（未指明）'}`);
+    if (reactPlan._addedTests && reactPlan._addedTests.length) {
+      console.log(`      Agent 补充选测 ${reactPlan._addedTests.length} 个：${reactPlan._addedTests.join(', ')}`);
+    }
+    if (reactPlan.blindSpots && reactPlan.blindSpots.length) {
+      console.log(`      Agent 识别盲区：${reactPlan.blindSpots.join('；')}`);
+    }
+  }
 
+  console.log('🧪 执行验证（worktree 真实跑测）…');
+  const run1 = await runInWorktree(target, runTests);
+  const { unit, api, ui } = run1;
+  const results = [...unit, ...api, ...ui];
+  // 语义理解（已与跑测并行）此刻应已完成，补打展示
+  impact.llmUnderstand = await semanticP;
+  if (impact.llmUnderstand) {
+    console.log(`   🤖 AI 语义理解：意图=${impact.llmUnderstand.intent} ｜ 风险=${impact.llmUnderstand.riskLevel}`);
+    console.log(`      影响流程：${(impact.llmUnderstand.businessFlows || []).join('、') || '（未指明）'}`);
+  } else if (isLLMEnabled()) {
+    console.log('   （AI 语义理解未返回有效结果，沿用结构分析）');
+  } else {
+    console.log('   （AI 语义分析未启用 · 离线模式，沿用结构分析）');
+  }
+
+  // 构建领域上下文（供根因/生成读取日志与源码；不再注入 ReAct 工具）
+  const officerCtx = buildOfficerCtx({ repoDir, diffText, lastUnitRaw: run1.raw.unit, sel });
+
+  // AI 根因推理（单发 chat + 日志内联，去掉伪工具循环）：用模型结合 diff + 真实日志重写 rootCause
+  const failing = results.filter((r) => r.status === 'fail');
+  if (failing.length) {
+    const causes = await llmRootCause(diffText, failing, officerCtx);
+    for (const r of failing) if (causes[r.name]) r.rootCause = causes[r.name];
+  }
+
+  // ---------- 自适应策略（P1）：首轮失败后，确定性决策 + 可选快模型旁白 ----------
+  let adaptive = null;
+  if (failing.length) {
+    const decision = await adaptiveDecision(failing);
+    adaptive = await runAdaptive({ decision, failing, target, repoDir, originalRun: runTests });
+    if (adaptive.extraResults.length) results.push(...adaptive.extraResults);
+    // 扩展选测可能暴露新的失败 → 只对【首轮未出现的新失败】补跑 AI 根因，避免整轮重复
+    const firstFailNames = new Set(failing.map((f) => f.name));
+    const newFailing = results.filter((r) => r.status === 'fail' && !firstFailNames.has(r.name));
+    if (newFailing.length) {
+      const causes2 = await llmRootCause(diffText, newFailing, officerCtx);
+      for (const r of newFailing) if (causes2[r.name]) r.rootCause = causes2[r.name];
+    }
+    console.log(`🔄 自适应策略：${decision.rationale} ｜ ${adaptive.actions.join('；')}`);
+  }
+
+  // ---------- AI 测试生成（根因暴露盲区时，自动补写能复现 bug 的回归测试）----------
+  let generatedTests = [];
+  if (isLLMEnabled()) {
+    generatedTests = await generateRegressionTests({ target, failing, ctx: officerCtx });
+    if (generatedTests.length) console.log(`🧪 AI 生成回归测试：${generatedTests.filter((g) => g.status === 'reproduced').length} 个在缺陷分支可复现 bug`);
+  }
+
+  const u = impact.llmUnderstand;
   const plan = [
-    { step: `读 git diff ${base}..${target}`, why: '定位改动文件，判断影响面' },
+    {
+      step: `读 git diff ${base}..${target}`,
+      why: u ? `AI 语义理解：${u.intent}（${u.reasoning || '判断影响面'}）` : '定位改动文件，判断影响面',
+    },
+  ];
+  if (impact.reactPlan) {
+    plan.push({
+      step: `ReAct Agent 规划测试策略（核心风险：${impact.reactPlan.focus || '—'}）`,
+      why: `${impact.reactPlan.rationale || '自主规划测什么/顺序/是否含 UI'}`
+        + (impact.reactPlan.addedTests?.length ? `；补充选测 ${impact.reactPlan.addedTests.length} 个` : '')
+        + (impact.reactPlan.blindSpots?.length ? `；识别盲区 ${impact.reactPlan.blindSpots.length} 处` : ''),
+    });
+  }
+  plan.push(
     sel.narrowed
-      ? { step: `仅跑受影响测试（${sel.testFiles.length} 个）`, why: sel.reason }
+      ? { step: `仅跑受影响测试（${sel.testFiles.length} 个）`, why: (u && u.recommendedFocus?.length ? `AI 建议重点：${u.recommendedFocus.join('、')}；` : '') + sel.reason }
       : { step: '跑全量单测 node --test', why: sel.reason },
     { step: '跑 API 端到端冒烟', why: '真实 API 端到端验证核心下单链路' },
-  ];
+  );
+  if (adaptive && adaptive.actions.length) {
+    plan.push({
+      step: `自适应扩展/复跑（${adaptive.expandedTests.length} 个新测试）`,
+      why: `首轮失败触发：${adaptive.decision?.rationale || ''}`,
+    });
+  }
 
   const report = {
-    meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString() },
+    meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
     impact,
     plan,
     results,
-    process: buildProcess({ scenario, impact, sel, summary: summarize(results) }),
+    adaptive,
+    generatedTests,
+    process: buildProcess({ scenario, impact, sel, summary: summarize(results), adaptive, generatedTests }),
     summary: summarize(results),
   };
 
@@ -615,7 +1450,16 @@ async function main() {
   console.log(`📝 已写 ${reportJsonPath}`);
 
   await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
+
+  // ---------- PR/MR 自动回写闭环（问题2）：跑完 → 在工蜂 MR 下评论测试结果（有凭据则真写，否则 dry-run）----------
+  await commentToPR({ report });
+
+  // ---------- 企微真实推送闭环：跑完 → 实时推送给值班/开发（配置 --webhook/WEBHOOK_URL 则真推，否则跳过）----------
+  await pushToWeChat({ report });
+
+
   console.log(`\n✅ 完成：通过 ${report.summary.pass} / 失败 ${report.summary.fail}`);
+  console.log(perf());
 }
 
 main().catch((e) => {
