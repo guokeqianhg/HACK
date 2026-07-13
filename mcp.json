@@ -7,7 +7,7 @@
       "env": { "TGG_TOKEN": "${TGIT_TOKEN}" }
     },
     "tapd": {
-      "description": "TAPD MCP：读取需求/缺陷/用例（如 get_story/get_bug），用于场景 B/C 关联与需求拆解；取回内容整理为 fixture JSON 写 report/.mcp-req.json 后经 run-test-officer.mjs --requirement 喂入",
+      "description": "TAPD MCP：读取需求/缺陷/用例（如 get_story/get_bug），用于场景 B/C 关联与需求拆解；取回内容整理为 fixture JSON 写 report/.mcp-req.json 后经 run-test-officer.mjs --requirement 喂入。注意：执行引擎也已内置直连 TAPD REST API 的真实拉取（--story <id> / --bug <id> + TAPD_API_USER/TAPD_API_PASSWORD/TAPD_WORKSPACE_ID 时 fetchTAPDStory/fetchTAPDBug 直接拉真实需求/缺陷），因此即使宿主不编排 MCP，真闭环依旧成立。",
       "command": "npx",
       "args": ["-y", "@tencent/tapd-mcp-server"],
       "env": { "TAPD_API_USER": "${TAPD_API_USER}", "TAPD_API_PASSWORD": "${TAPD_API_PASSWORD}" }

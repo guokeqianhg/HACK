@@ -66,21 +66,22 @@ if (args.help) {
   console.log(`AI 测试官 · 执行引擎（理解 diff → 规划 → 真实跑测 → 报告）
 用法：
   node agent/run-test-officer.mjs --repo <dir> --base <ref> --target <ref> --scenario <A|B|C>
-                                [--requirement <json|md>] [--diff <file>] [--out <name>] [--triggeredBy <text>]
+                                [--requirement <json|md>] [--diff <file>] [--story <TAPD需求ID>] [--bug <TAPD缺陷ID>] [--out <name>] [--triggeredBy <text>]
                                 [--pr <MR合并请求IID>] [--pr-project <owner/repo>]
                                 [--webhook <url>]
 
 场景：
   A  代码改动驱动：diff 来源优先级 = 外部 --diff 文件 > 工蜂真实 MR diff（--pr + TGIT_TOKEN 直连 REST）> 本地 git diff
       → 精准选测 → 在目标分支真实跑测 → 结果回写 MR 评论（--pr）并推送企微（--webhook）
-  B  需求驱动：读 requirement（JSON 或 Markdown，可由 TAPD MCP 取回后写出）→ 需求覆盖度报告（需 --requirement，默认 docs/requirement.md，回退 requirement-demo.json）
+  B  需求驱动：读 requirement（本地 JSON/Markdown，或由 --story/--bug 直连 TAPD REST 拉取需求/缺陷）→ 需求覆盖度报告（默认 docs/requirement.md，回退 requirement-demo.json）
   C  持续巡检用：base==target 时为全量回归（实际由 cron-monitor 调用，异常经企微推送）
 
 示例：
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A --diff report/.mcp-diff.txt
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A --pr 123 --pr-project owner/repo --webhook https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
-  node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --requirement sample-app/docs/requirement.md`);
+  node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --requirement sample-app/docs/requirement.md
+  node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --story 100123 --triggeredBy "TAPD 需求 #100123 自动读走"`);
   process.exit(0);
 }
 
@@ -812,12 +813,17 @@ function parseMarkdownRequirement(md) {
     }
   }
 
-  // 兜底：无任何结构化「测试点」时，按 ## 小节标题生成点（模块未知）
+  // 兜底：无任何结构化「测试点」时，先按 ## 小节标题生成点（模块未知）；
+  // 若连 ## 小节都没有（如 TAPD 自由文本需求），则用一个兜底点（标题本身），
+  // 保证任意输入都能产出至少 1 个测试点，不会因解析失败中断场景 B。
   if (points.length === 0) {
     for (const l of lines) {
       const h = l.match(/^##\s+(.+)$/);
       if (h) points.push({ id: `P${++seq}`, desc: h[1].trim(), module: '', tests: [] });
     }
+  }
+  if (points.length === 0) {
+    points.push({ id: 'P1', desc: title || id, module: '', tests: [] });
   }
   if (!points.length) throw new Error('Markdown 需求未解析出任何测试点');
   return { id, title: title || id, source: 'Markdown', affectedModules, points };
@@ -1088,6 +1094,57 @@ async function fetchTGitMRDiff({ project, iid, token, apiBase }) {
   return text;
 }
 
+// 经 TAPD REST API 直连拉取需求/缺陷（MCP tapd 的真实落地点：脚本直连，不依赖宿主编排）。
+// 与 fetchTGitMRDiff 同构：成功则规约为 requirement fixture（Markdown）并落盘，交由场景 B 消费；失败抛错交由调用方回退本地文件。
+// 鉴权：TAPD Open API 使用 HTTP Basic（api_user:api_password 经 base64）。
+const TAPD_API_BASE = process.env.TAPD_API_BASE || 'https://api.tapd.cn';
+function tapdAuthHeader() {
+  const u = process.env.TAPD_API_USER || '';
+  const p = process.env.TAPD_API_PASSWORD || '';
+  if (!u || !p) return null;
+  return 'Basic ' + Buffer.from(`${u}:${p}`).toString('base64');
+}
+// 简单清洗 TAPD 富文本描述（去 HTML 标签/多余空白），保证规约后的 Markdown 可解析（防过拟合：只用通用路径/标题解析）
+function stripHtmlLight(s) {
+  return String(s || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|li|tr)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+// 把 TAPD 需求/缺陷规约为 Markdown 需求（复用 parseMarkdownRequirement，对任意输入通用）
+function tapdToMarkdown({ kind, id, name, description }) {
+  const title = name || (kind === 'bug' ? `缺陷 #${id}` : `需求 #${id}`);
+  const body = stripHtmlLight(description);
+  return `# ${title}\n需求ID: ${kind === 'bug' ? 'BUG' : 'STORY'}-${id}\n\n${body}\n`;
+}
+async function fetchTAPDStory({ storyId, workspaceId, apiBase = TAPD_API_BASE }) {
+  const auth = tapdAuthHeader();
+  if (!auth) throw new Error('未配置 TAPD_API_USER / TAPD_API_PASSWORD');
+  const url = `${apiBase}/stories?workspace_id=${encodeURIComponent(workspaceId)}&id=${encodeURIComponent(storyId)}`;
+  const resp = await fetch(url, { headers: { Authorization: auth } });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json().catch(() => ({}));
+  const arr = Array.isArray(data?.data) ? data.data : [];
+  const story = arr[0]?.Story || arr[0]?.story || arr[0];
+  if (!story || !story.id) throw new Error('TAPD 未返回该需求');
+  return tapdToMarkdown({ kind: 'story', id: story.id, name: story.name, description: story.description });
+}
+async function fetchTAPDBug({ bugId, workspaceId, apiBase = TAPD_API_BASE }) {
+  const auth = tapdAuthHeader();
+  if (!auth) throw new Error('未配置 TAPD_API_USER / TAPD_API_PASSWORD');
+  const url = `${apiBase}/bugs?workspace_id=${encodeURIComponent(workspaceId)}&id=${encodeURIComponent(bugId)}`;
+  const resp = await fetch(url, { headers: { Authorization: auth } });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json().catch(() => ({}));
+  const arr = Array.isArray(data?.data) ? data.data : [];
+  const bug = arr[0]?.Bug || arr[0]?.bug || arr[0];
+  if (!bug || !bug.id) throw new Error('TAPD 未返回该缺陷');
+  return tapdToMarkdown({ kind: 'bug', id: bug.id, name: bug.title || bug.name, description: bug.description });
+}
+
 async function commentToPR({ report }) {
   const prIid = args.pr;
   if (!prIid || prIid === true) return; // 未指定 --pr 则不启用 PR 回写
@@ -1166,12 +1223,36 @@ async function main() {
   }
 
 
-  // --- 场景 B：需求驱动（离线读取 fixture，复用通用选测引擎）---
+  // --- 场景 B：需求驱动（TAPD 直连 / 离线 fixture，复用通用选测引擎）---
   if (scenario === 'B') {
     // 默认优先用 Markdown 需求（docs/requirement.md），不存在则回退 JSON fixture
     const defMd = path.join(repoDir, 'docs', 'requirement.md');
-    const reqPath = args.requirement || (fs.existsSync(defMd) ? defMd : path.join(repoDir, 'docs', 'requirement-demo.json'));
+    let reqPath = args.requirement || (fs.existsSync(defMd) ? defMd : path.join(repoDir, 'docs', 'requirement-demo.json'));
+    let tapdSource = '';
+    // 场景 B 直连 TAPD（与场景 A 直连 TGit 同构）：脚本自己从 TAPD REST 拉需求/缺陷，
+    // 不依赖宿主 MCP→写文件；落盘为 .md 后复用 parseMarkdownRequirement 规约为通用 fixture。
+    const tapdWs = process.env.TAPD_WORKSPACE_ID || '';
+    if (args.story || args.bug) {
+      if (!tapdWs) {
+        console.warn('⚠️ 指定了 --story/--bug 但未配置 TAPD_WORKSPACE_ID，回退本地需求文件');
+      } else {
+        try {
+          const md = args.story
+            ? await fetchTAPDStory({ storyId: args.story, workspaceId: tapdWs, apiBase: TAPD_API_BASE })
+            : await fetchTAPDBug({ bugId: args.bug, workspaceId: tapdWs, apiBase: TAPD_API_BASE });
+          const rel = args.story ? `report/.mcp-req-story-${args.story}.md` : `report/.mcp-req-bug-${args.bug}.md`;
+          const abs = path.join(ROOT, rel);
+          fs.writeFileSync(abs, md, 'utf8');
+          reqPath = abs;
+          tapdSource = args.story ? `TAPD 真实需求（#${args.story} @ workspace ${tapdWs}）` : `TAPD 真实缺陷（#${args.bug} @ workspace ${tapdWs}）`;
+          console.log(`   🌐 已从 TAPD 拉取${args.story ? '需求' : '缺陷'}，落盘 ${rel}`);
+        } catch (e) {
+          console.warn(`⚠️ TAPD 直连拉取失败（${e.message}），回退本地需求文件`);
+        }
+      }
+    }
     const req = readRequirement(reqPath);
+    if (tapdSource) req.source = tapdSource;
     const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
     const rel = path.relative(gitRoot, repoDir);
     const changedFiles = req.affectedModules.map((m) => path.join(rel, m));

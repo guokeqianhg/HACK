@@ -124,6 +124,13 @@ const html = `<!DOCTYPE html>
   th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;vertical-align:top}
   th{background:#fafafa}
   code{background:#f3f4f6;padding:2px 6px;border-radius:4px;font-size:12px}
+  /* 表格折叠（交互展示）：默认展开，可点击 summary 折叠 */
+  details > summary.fold{cursor:pointer;color:#2b5fff;font-size:13px;font-weight:600;margin-bottom:8px;user-select:none;list-style:none}
+  details > summary.fold::-webkit-details-marker{display:none}
+  details[open] > summary.fold::before{content:"▾ "}
+  details:not([open]) > summary.fold::before{content:"▸ "}
+  /* 宽表防破版：窄屏横向滚动而非撑破布局 */
+  .card > details > table{display:block;width:100%;overflow-x:auto}
   .tag{display:inline-block;background:#eef2ff;color:#2b5fff;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px}
   ul{margin:0;padding-left:18px}
   .cov-pass td:nth-child(4){color:#2b8a3e}
@@ -161,15 +168,19 @@ const html = `<!DOCTYPE html>
   ${coverage.length ? `
   <div class="card">
     <h2>需求覆盖度（场景 B）</h2>
+    <details open><summary class="fold">展开 / 折叠覆盖度矩阵</summary>
     <table><thead><tr><th>测试点</th><th>需求描述</th><th>模块</th><th>状态</th><th>关联测试</th><th>核对说明</th><th>AI 语义评审</th></tr></thead>
     <tbody>${renderCoverage}</tbody></table>
+    </details>
   </div>` : ''}
 
   ${generatedTests.length ? `
   <div class="card">
     <h2>AI 生成的回归测试（测试生成 Agent）</h2>
+    <details open><summary class="fold">展开 / 折叠生成测试</summary>
     <table><thead><tr><th>针对用例</th><th>生成文件</th><th>状态</th><th>锁定的正确行为</th></tr></thead>
     <tbody>${generatedTests.map((g) => `<tr><td>${esc(g.name)}</td><td><code>${esc(g.fileName || '-')}</code></td><td><b style="color:${g.status === 'reproduced' ? '#2b8a3e' : '#c0392b'}">${g.status === 'reproduced' ? '✅ 缺陷分支可复现' : '⚠️ 未生成'}</b></td><td>${esc(g.asserts || '-')}</td></tr>`).join('')}</tbody></table>
+    </details>
     <p style="font-size:12px;color:#555">生成测试在【缺陷分支】失败 = 能抓住该 bug，已写入仓库 tests/ 作为回归守卫（修复后应通过，可纳入 CI 复跑）。</p>
   </div>` : ''}
 
@@ -198,8 +209,10 @@ const html = `<!DOCTYPE html>
 
   <div class="card">
     <h2>执行结果</h2>
+    <details open><summary class="fold">展开 / 折叠执行结果</summary>
     <table><thead><tr><th>用例</th><th>类型</th><th>状态</th><th>严重级</th><th>根因</th><th>复现</th></tr></thead>
     <tbody>${renderResults || '<tr><td colspan="6">无结果</td></tr>'}</tbody></table>
+    </details>
   </div>
 
   <div class="card">
