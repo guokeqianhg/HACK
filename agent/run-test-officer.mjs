@@ -28,9 +28,14 @@ import { selectTests, isSourceFile, isTestFile, isRunnableTest, testsForModule, 
 import { isLLMEnabled, callLLM, extractJSON, loadEnv, chat, _llmStats, fastModel, hasFastModel } from './llm.mjs';
 import { runAgent } from './agent.mjs';
 import { makeOfficerTools } from './officer-tools.mjs';
+import { makeLiveEmitter } from './live-emitter.mjs';
 
 // 启动时加载本地 .env（含 LLM 密钥）；未配置则整层 LLM 自动失效、回退确定性逻辑。
 await loadEnv();
+
+// 实时事件发射器（供 report/live.html 看板订阅）：main() 开头会用真实 outName 重新绑定，
+// 这里先给一个 no-op 默认值，避免顶层函数在极早期被调用时报错。
+let liveEmit = () => {};
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -1103,7 +1108,7 @@ function buildProcess({ scenario, req, impact, sel, summary, adaptive, generated
 // 与确定性 selectTests 的关系：selectTests 给出"结构可达"的候选集（导入图/同名），
 // ReAct Agent 则从"改动语义 + 业务风险"出发，判断这些候选里【哪些最该先测、是否要含 UI、有无遗漏】，
 // 产出一份"测试计划"，其建议的测试文件与结构选测取并集。自主性从"局部决策"升级为"整体策略规划"。
-async function planWithReActAgent({ repoDir, diffText, impact, sel, officerCtx }) {
+async function planWithReActAgent({ repoDir, diffText, impact, sel, officerCtx, onLiveStep }) {
   if (!isLLMEnabled() || !hasFastModel()) return null;
 
   const tools = makeOfficerTools({ ...officerCtx, repoDir });
@@ -1140,6 +1145,7 @@ async function planWithReActAgent({ repoDir, diffText, impact, sel, officerCtx }
         if (s.type === 'reason') trace.push({ kind: 'think', text: String(s.text).slice(0, 400) });
         else if (s.type === 'action') trace.push({ kind: 'act', tool: s.tool, args: s.args });
         else if (s.type === 'answer') trace.push({ kind: 'answer', text: String(s.text).slice(0, 400) });
+        if (onLiveStep) { try { onLiveStep(s); } catch { /* 实时上报失败不影响主流程 */ } }
       },
     });
     plan = extractJSON(res.answer);
@@ -1173,7 +1179,13 @@ function buildPRComment({ report, reportUrl }) {
   const lines = [];
   lines.push(`## ${icon} AI 测试官 · 自动化验证报告`);
   lines.push('');
-  lines.push(`**结论**：通过 ${s.pass} / 失败 ${s.fail}（通过率 ${passRate}%）`);
+  // 措辞说明：避免"通过 X / 失败 Y"被误读为"AI 测试官只做对了 X 件事"——
+  // 失败数是 AI 测试官成功捕获的问题信号数，数字越高代表发现的风险越多，而非工具本身运行失败。
+  lines.push(
+    s.fail > 0
+      ? `**结论**：AI 测试官在本次共 ${s.total} 项验证中，发现 **${s.fail} 个问题**（符合预期 ${s.pass} 项，占比 ${passRate}%）——须修复并复测通过后方可合入/发布。`
+      : `**结论**：AI 测试官完成本次共 ${s.total} 项验证，全部符合预期（${passRate}%），未发现异常，可放行。`
+  );
   if (report.impact?.llmUnderstand) {
     const u = report.impact.llmUnderstand;
     lines.push(`**AI 语义理解**：意图=${u.intent} ｜ 风险=${u.riskLevel}`);
@@ -1354,6 +1366,11 @@ async function main() {
   const outName = args.out || 'report';
   const reportJsonPath = path.join(ROOT, 'report', `${outName}.json`);
 
+  // 绑定实时事件发射器：后续每个阶段会写一行 NDJSON，供 report/live-server.mjs 起的看板订阅展示
+  // Think→Act→Observe 的真实执行过程（不影响主流程，写失败也静默忽略）。
+  liveEmit = makeLiveEmitter(outName);
+  liveEmit({ type: 'meta', title: `场景 ${scenario}`, detail: `${args.repo || 'sample-app'} · ${triggeredBy}`, scenario, outName });
+
   // 预热快模型代理：首次调用常因代理冷启动慢 10~30s。这里在后台提前发一个极小请求，
   // 与后续的 git 解析 / 选测 / 首轮跑测（约 30s）并行，避免冷启动落在关键路径上。
   if (isLLMEnabled() && hasFastModel()) {
@@ -1363,6 +1380,7 @@ async function main() {
 
   // --- 场景 B：需求驱动（TAPD 直连 / 离线 fixture，复用通用选测引擎）---
   if (scenario === 'B') {
+    liveEmit.phase('understand', '① 读需求/缺陷', '解析需求文档，拆解测试点');
     // 默认优先用 Markdown 需求（docs/requirement.md），不存在则回退 JSON fixture
     const defMd = path.join(repoDir, 'docs', 'requirement.md');
     let reqPath = args.requirement || (fs.existsSync(defMd) ? defMd : path.join(repoDir, 'docs', 'requirement-demo.json'));
@@ -1391,12 +1409,14 @@ async function main() {
     }
     const req = readRequirement(reqPath);
     if (tapdSource) req.source = tapdSource;
+    liveEmit({ type: 'log', phase: 'understand', detail: `已读需求 ${req.id} · ${req.title}（${req.points.length} 个测试点）` });
 
     // 自由文本需求（无预设「## 模块：/### 测试点」格式）时，规则解析会降级为弱兜底（仅标题占位）。
     // 此时若 LLM 可用，让 AI 直接读需求原文自主拆解测试点并归属真实模块，
     // 更贴近赛题「不给测试清单，AI 自己读懂需求拆场景」的要求；解析失败或 LLM 不可用则保留规则兜底结果，不阻断流程。
     let requirementAiExtracted = false;
     if (req.weakFallback && isLLMEnabled()) {
+      liveEmit.phase('understand', '① 读需求/缺陷', '需求无预设格式，AI 自主拆解测试点…');
       const reqTextForAI = readTextRobust(reqPath);
       const aiPoints = await llmExtractRequirementPoints(reqTextForAI, repoDir);
       if (aiPoints && aiPoints.length) {
@@ -1404,8 +1424,10 @@ async function main() {
         req.affectedModules = [...new Set(aiPoints.map((p) => p.module).filter(Boolean))];
         requirementAiExtracted = true;
         console.log(`   🤖 需求无预设格式，AI 自主拆解出 ${aiPoints.length} 个测试点（替代弱兜底占位）`);
+        liveEmit({ type: 'log', phase: 'understand', detail: `🤖 AI 自主拆解出 ${aiPoints.length} 个测试点` });
       }
     }
+    liveEmit.phase('understand', '① 读需求/缺陷', `${req.id} · ${req.title}`, 'done');
 
     const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
     const rel = path.relative(gitRoot, repoDir);
@@ -1425,22 +1447,28 @@ async function main() {
     impact.narrowed = sel.narrowed;
     impact.selectionReason = sel.reason;
     console.log(`📋 场景 B · 需求 ${req.id}（${req.points.length} 测试点）→ 关联 ${sel.testFiles.length} 个测试`);
+    liveEmit.phase('plan', '② 拆解测试点 · 选测策略', `${req.points.length} 个测试点 → 关联 ${sel.testFiles.length} 个测试`, 'done');
 
     console.log('🧪 执行验证（worktree 真实跑测）…');
+    liveEmit.phase('execute', '③ 执行验证', `worktree 真实跑测 ${sel.testFiles.length} 个测试文件…`);
     const run1B = await runInWorktree(target, sel.testFiles);
     const { unit, api, ui } = run1B;
     const results = [...unit, ...api, ...ui];
+    liveEmit.phase('execute', '③ 执行验证', `完成：通过 ${results.filter((r) => r.status === 'pass').length} / 失败 ${results.filter((r) => r.status === 'fail').length}`, 'done');
     const officerCtxB = buildOfficerCtx({ repoDir, diffText: '', lastUnitRaw: run1B.raw.unit, sel });
     // AI 根因推理（场景 B 同样适用：单发 chat + 日志内联，结合失败日志重写 rootCause）
     const failingB = results.filter((r) => r.status === 'fail');
     if (failingB.length) {
+      liveEmit.phase('rootcause', '④ AI 根因推理', `分析 ${failingB.length} 个失败用例…`);
       const causesB = await llmRootCause('', failingB, officerCtxB);
       for (const r of failingB) if (causesB[r.name]) r.rootCause = causesB[r.name];
+      liveEmit.phase('rootcause', '④ AI 根因推理', `完成 ${failingB.length} 个失败用例的语义归因`, 'done');
     }
 
     // ---------- 自适应策略（P1）：确定性决策 + 可选快模型旁白 ----------
     let adaptiveB = null;
     if (failingB.length) {
+      liveEmit.phase('adaptive', '⑤ 自适应策略', '首轮出现失败，扩展选测 + 深度复跑…');
       const decisionB = await adaptiveDecision(failingB);
       adaptiveB = await runAdaptive({ decision: decisionB, failing: failingB, target, repoDir, originalRun: sel.testFiles });
       if (adaptiveB.extraResults.length) results.push(...adaptiveB.extraResults);
@@ -1451,16 +1479,21 @@ async function main() {
         for (const r of newFailingB) if (causesB2[r.name]) r.rootCause = causesB2[r.name];
       }
       console.log(`🔄 自适应策略：${decisionB.rationale} ｜ ${adaptiveB.actions.join('；')}`);
+      liveEmit.phase('adaptive', '⑤ 自适应策略', adaptiveB.actions.join('；'), 'done');
     }
 
     // ---------- AI 测试生成（根因暴露盲区时，自动补写能复现 bug 的回归测试）----------
     let generatedTests = [];
     if (isLLMEnabled()) {
+      liveEmit.phase('gentest', '⑥ AI 生成回归测试', '检查是否需要为失败用例生成回归守卫…');
       generatedTests = await generateRegressionTests({ target, failing: failingB, ctx: officerCtxB });
       if (generatedTests.length) {
         const ok = generatedTests.filter((g) => g.status === 'reproduced').length;
         const reused = generatedTests.filter((g) => g.status === 'existing').length;
         console.log(`🧪 AI 生成回归测试：${ok} 个新生成可复现 bug${reused ? ` / ${reused} 个复用已有守卫（去重）` : ''}`);
+        liveEmit.phase('gentest', '⑥ AI 生成回归测试', `${ok} 个新生成 / ${reused} 个复用去重`, 'done');
+      } else {
+        liveEmit.phase('gentest', '⑥ AI 生成回归测试', '无需生成', 'done');
       }
     }
 
@@ -1472,6 +1505,7 @@ async function main() {
     // ---------- AI 覆盖度语义判定（事实由引擎测、语义由 LLM 判；覆盖度判定 ∥ 需求审计并行）----------
     let aiSuggestedPoints = [];
     if (isLLMEnabled()) {
+      liveEmit.phase('coverage', '⑦ AI 覆盖度语义判定', `${req.points.length} 个测试点做语义评审…`);
       const evidence = gatherCoverageEvidence(req, results, repoDir);
       const reqText = readTextRobust(reqPath);
       const [aiCov, aiAudit] = await Promise.all([
@@ -1491,6 +1525,7 @@ async function main() {
         console.log(`   🤖 AI 需求审计：发现 ${aiSuggestedPoints.length} 个文档提及但测试点未覆盖的能力`);
       }
       impact.aiCoverage = true;
+      liveEmit.phase('coverage', '⑦ AI 覆盖度语义判定', `覆盖 ${covered} / 缺口 ${gaps} / 不达标 ${failingPts}`, 'done');
     }
 
     const plan = [
@@ -1520,9 +1555,12 @@ async function main() {
     };
     fs.writeFileSync(reportJsonPath, JSON.stringify(report, null, 2), 'utf8');
     console.log(`📝 已写 ${reportJsonPath}`);
+    liveEmit.phase('report', '⑧ 生成可决策报告', `report/${outName}.html`);
     await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
-    console.log(`\n✅ 场景 B 完成：覆盖 ${covered} / 缺口 ${gaps} / 不达标 ${failingPts}`);
+    liveEmit.phase('report', '⑧ 生成可决策报告', `report/${outName}.html`, 'done');
+    console.log(`\n✅ 场景 B 完成：需求覆盖 ${covered} 项 / 缺口 ${gaps} 项 / AI 测试官发现 ${failingPts} 个不达标问题`);
     console.log(perf());
+    liveEmit.done({ summary: report.summary, reportFile: `${outName}.html` });
     return;
   }
 
@@ -1559,6 +1597,7 @@ async function main() {
     diffSource = `git diff ${base}..${target}`;
   }
   console.log(`🔍 理解变更：${diffSource}`);
+  liveEmit.phase('understand', '① 理解变更', diffSource);
   const impact = analyzeDiff(diffText);
   impact.diffSource = diffSource;
   impact.aiEnabled = isLLMEnabled();
@@ -1566,6 +1605,8 @@ async function main() {
   const semanticP = isLLMEnabled() ? semanticAnalyze(diffText, impact).catch(() => null) : Promise.resolve(null);
   console.log(`   改动文件：${impact.changedFiles.join(', ') || '(无)'}`);
   console.log(`   改动函数：${impact.changedFunctions.join(', ') || '(无)'}`);
+  liveEmit({ type: 'log', phase: 'understand', detail: `改动文件：${impact.changedFiles.join(', ') || '(无)'}` });
+  liveEmit.phase('understand', '① 理解变更', impact.scope, 'done');
 
   // 通用精准选测：导入图反向可达 + 同名兜底（不依赖业务语义）
   const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
@@ -1574,10 +1615,22 @@ async function main() {
   impact.narrowed = sel.narrowed;
   impact.selectionReason = sel.reason;
   console.log(`   ${sel.narrowed ? '🎯 精准选测' : '⚠️ 全量回退'}：${sel.reason}`);
+  liveEmit.phase('select', '② 选测策略', sel.reason, 'done');
 
   // ---------- ReAct 整体规划（问题3）：Agent 自主观察 diff/测试集，规划"测什么/顺序/是否含 UI"，与结构选测取并集 ----------
+  // ReAct 循环的每一步（Think 推理 / Act 调用工具 / Observe 结果）实时写入事件流，
+  // 供 report/live.html 看板逐步展示，而不是等 Agent 跑完才一次性看到最终结论。
+  liveEmit.phase('react', '③ ReAct 规划', 'Agent 自主观察 diff/测试集，规划测试策略…');
   const officerCtxPlan = buildOfficerCtx({ repoDir, diffText, lastUnitRaw: '', sel });
-  const reactPlan = await planWithReActAgent({ repoDir, diffText, impact, sel, officerCtx: officerCtxPlan });
+  const reactPlan = await planWithReActAgent({
+    repoDir, diffText, impact, sel, officerCtx: officerCtxPlan,
+    onLiveStep: (s) => {
+      if (s.type === 'reason') liveEmit({ type: 'log', phase: 'react', kind: 'think', detail: '🧠 ' + String(s.text).slice(0, 200) });
+      else if (s.type === 'action') liveEmit({ type: 'log', phase: 'react', kind: 'act', detail: `🛠 调用 ${s.tool}(${JSON.stringify(s.args || {})})` });
+      else if (s.type === 'answer') liveEmit({ type: 'log', phase: 'react', kind: 'answer', detail: '✅ ' + String(s.text).slice(0, 200) });
+    },
+  });
+  liveEmit.phase('react', '③ ReAct 规划', reactPlan ? `核心风险：${reactPlan.focus || '—'}` : '未启用 / 跳过', 'done');
   let runTests = sel.testFiles;
   if (reactPlan) {
     runTests = reactPlan._mergedTests && reactPlan._mergedTests.length ? reactPlan._mergedTests : sel.testFiles;
@@ -1600,14 +1653,17 @@ async function main() {
   }
 
   console.log('🧪 执行验证（worktree 真实跑测）…');
+  liveEmit.phase('execute', '④ 执行验证', `worktree 真实跑测 ${runTests.length} 个测试文件…`);
   const run1 = await runInWorktree(target, runTests);
   const { unit, api, ui } = run1;
   const results = [...unit, ...api, ...ui];
+  liveEmit.phase('execute', '④ 执行验证', `完成：通过 ${results.filter((r) => r.status === 'pass').length} / 失败 ${results.filter((r) => r.status === 'fail').length}`, 'done');
   // 语义理解（已与跑测并行）此刻应已完成，补打展示
   impact.llmUnderstand = await semanticP;
   if (impact.llmUnderstand) {
     console.log(`   🤖 AI 语义理解：意图=${impact.llmUnderstand.intent} ｜ 风险=${impact.llmUnderstand.riskLevel}`);
     console.log(`      影响流程：${(impact.llmUnderstand.businessFlows || []).join('、') || '（未指明）'}`);
+    liveEmit({ type: 'log', phase: 'understand', detail: `🤖 AI 语义理解：${impact.llmUnderstand.intent}（风险 ${impact.llmUnderstand.riskLevel}）` });
   } else if (isLLMEnabled()) {
     console.log('   （AI 语义理解未返回有效结果，沿用结构分析）');
   } else {
@@ -1620,13 +1676,16 @@ async function main() {
   // AI 根因推理（单发 chat + 日志内联，去掉伪工具循环）：用模型结合 diff + 真实日志重写 rootCause
   const failing = results.filter((r) => r.status === 'fail');
   if (failing.length) {
+    liveEmit.phase('rootcause', '⑤ AI 根因推理', `分析 ${failing.length} 个失败用例…`);
     const causes = await llmRootCause(diffText, failing, officerCtx);
     for (const r of failing) if (causes[r.name]) r.rootCause = causes[r.name];
+    liveEmit.phase('rootcause', '⑤ AI 根因推理', `完成 ${failing.length} 个失败用例的语义归因`, 'done');
   }
 
   // ---------- 自适应策略（P1）：首轮失败后，确定性决策 + 可选快模型旁白 ----------
   let adaptive = null;
   if (failing.length) {
+    liveEmit.phase('adaptive', '⑥ 自适应策略', '首轮出现失败，扩展选测 + 深度复跑…');
     const decision = await adaptiveDecision(failing);
     adaptive = await runAdaptive({ decision, failing, target, repoDir, originalRun: runTests });
     if (adaptive.extraResults.length) results.push(...adaptive.extraResults);
@@ -1638,16 +1697,21 @@ async function main() {
       for (const r of newFailing) if (causes2[r.name]) r.rootCause = causes2[r.name];
     }
     console.log(`🔄 自适应策略：${decision.rationale} ｜ ${adaptive.actions.join('；')}`);
+    liveEmit.phase('adaptive', '⑥ 自适应策略', adaptive.actions.join('；'), 'done');
   }
 
   // ---------- AI 测试生成（根因暴露盲区时，自动补写能复现 bug 的回归测试）----------
   let generatedTests = [];
   if (isLLMEnabled()) {
+    liveEmit.phase('gentest', '⑦ AI 生成回归测试', '检查是否需要为失败用例生成回归守卫…');
     generatedTests = await generateRegressionTests({ target, failing, ctx: officerCtx });
     if (generatedTests.length) {
       const ok = generatedTests.filter((g) => g.status === 'reproduced').length;
       const reused = generatedTests.filter((g) => g.status === 'existing').length;
       console.log(`🧪 AI 生成回归测试：${ok} 个新生成可复现 bug${reused ? ` / ${reused} 个复用已有守卫（去重）` : ''}`);
+      liveEmit.phase('gentest', '⑦ AI 生成回归测试', `${ok} 个新生成 / ${reused} 个复用去重`, 'done');
+    } else {
+      liveEmit.phase('gentest', '⑦ AI 生成回归测试', '无需生成', 'done');
     }
   }
 
@@ -1692,8 +1756,10 @@ async function main() {
 
   fs.writeFileSync(reportJsonPath, JSON.stringify(report, null, 2), 'utf8');
   console.log(`📝 已写 ${reportJsonPath}`);
+  liveEmit.phase('report', '⑧ 生成可决策报告', `report/${outName}.html`);
 
   await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
+  liveEmit.phase('report', '⑧ 生成可决策报告', `report/${outName}.html`, 'done');
 
   // ---------- PR/MR 自动回写闭环（问题2）：跑完 → 在工蜂 MR 下评论测试结果（有凭据则真写，否则 dry-run）----------
   await commentToPR({ report });
@@ -1702,11 +1768,17 @@ async function main() {
   await pushToWeChat({ report });
 
 
-  console.log(`\n✅ 完成：通过 ${report.summary.pass} / 失败 ${report.summary.fail}`);
+  console.log(
+    report.summary.fail > 0
+      ? `\n🐞 完成：AI 测试官在 ${report.summary.total} 项验证中发现 ${report.summary.fail} 个问题（符合预期 ${report.summary.pass} 项）`
+      : `\n✅ 完成：AI 测试官验证 ${report.summary.total} 项，全部符合预期`
+  );
   console.log(perf());
+  liveEmit.done({ summary: report.summary, reportFile: `${outName}.html` });
 }
 
 main().catch((e) => {
   console.error('❌ 执行失败:', e.message);
+  try { liveEmit({ type: 'log', phase: 'error', status: 'error', detail: '❌ 执行失败：' + e.message }); } catch {}
   process.exit(1);
 });

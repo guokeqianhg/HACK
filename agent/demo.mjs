@@ -38,12 +38,16 @@ function readReport(base) {
 function scenarioCard(title, sub, base, report) {
   const s = report?.summary || {};
   const ok = s.fail === 0;
-  const badge = !s.total ? '—' : ok ? '✅ 通过' : `❌ ${s.fail} 失败`;
+  const pct = s.total ? Math.round((s.pass / s.total) * 100) : 0;
+  // 措辞说明：ok=false 时不是"这个 Demo 场景跑失败了"，而是"AI 测试官在这个场景里真的抓到了 bug"——
+  // 用"发现 N 个问题"而非"N 失败"，避免被误读为工具本身运行出错。
+  const badge = !s.total ? '—' : ok ? '✅ 未发现异常' : `🐞 发现 ${s.fail} 个问题`;
   return `
-  <a class="sc" href="./${base}.html">
-    <div class="sctitle">${title}</div>
+  <a class="sc ${ok ? 'sc-ok' : 'sc-bad'}" href="./${base}.html">
+    <div class="scrow"><div class="sctitle">${title}</div><div class="scstatus ${ok ? 'ok' : 'bad'}">${badge}</div></div>
     <div class="scsub">${sub}</div>
-    <div class="scstatus ${ok ? 'ok' : 'bad'}">${badge} <span>${s.pass ?? 0}通过 / ${s.total ?? 0}总</span></div>
+    <div class="scbar"><i style="width:${pct}%;background:${ok ? '#3ddc97' : '#ff6b81'}"></i></div>
+    <div class="scnum">${s.pass ?? 0} 符合预期 / ${s.total ?? 0} 总验证项（${pct}%）</div>
   </a>`;
 }
 
@@ -87,25 +91,40 @@ async function main() {
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>AI 测试官 · 离线 Demo 总览</title>
 <style>
-  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;background:#0f1320;color:#e8eaed}
-  header{background:linear-gradient(135deg,#2b5fff,#7b5fff);color:#fff;padding:28px 32px}
-  header h1{margin:0;font-size:24px}
-  header p{opacity:.9;margin:8px 0 0}
-  main{max-width:1080px;margin:0 auto;padding:28px}
+  :root{--bg:#0b0e17;--panel:#12172a;--panel2:#161c33;--line:#232a45;--txt:#e7eaf6;--sub:#8993b8;--accent:#6d8dff;--accent2:#9b7dff;--ok:#3ddc97;--err:#ff6b81}
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;background:radial-gradient(1200px 620px at 15% -10%,#1a2148 0%,var(--bg) 55%);color:var(--txt);min-height:100vh}
+  header{padding:32px 32px 26px;border-bottom:1px solid var(--line);background:rgba(18,23,42,.4)}
+  header h1{margin:0;font-size:25px;font-weight:800;background:linear-gradient(135deg,#c9d4ff,#e8d9ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  header p{opacity:.85;margin:10px 0 0;font-size:13.5px;color:var(--sub);max-width:680px;line-height:1.7}
+  .livebadge{display:inline-flex;align-items:center;gap:7px;margin-top:14px;font-size:12.5px;padding:7px 14px;border-radius:20px;background:rgba(109,141,255,.12);border:1px solid rgba(109,141,255,.35);color:var(--accent)}
+  .livebadge .lb-dot{width:7px;height:7px;border-radius:50%;background:var(--ok);animation:pulse 1.4s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(61,220,151,.55)}70%{box-shadow:0 0 0 7px rgba(61,220,151,0)}100%{box-shadow:0 0 0 0 rgba(61,220,151,0)}}
+  main{max-width:1080px;margin:0 auto;padding:30px 32px 60px}
   .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
-  .sc{display:block;background:#1a1f30;border:1px solid #2a3148;border-radius:12px;padding:16px;text-decoration:none;color:inherit;transition:.15s}
-  .sc:hover{border-color:#2b5fff;transform:translateY(-2px)}
-  .sctitle{font-size:16px;font-weight:700}
-  .scsub{font-size:12px;color:#9aa3b2;margin:6px 0 12px}
-  .scstatus{display:inline-flex;gap:8px;align-items:center;font-size:13px;font-weight:600;padding:4px 10px;border-radius:20px}
-  .scstatus.ok{background:#14361f;color:#5fd98a}
-  .scstatus.bad{background:#3a1717;color:#ff8a8a}
-  .note{margin-top:22px;padding:14px 18px;background:#1a1f30;border-left:4px solid #7b5fff;border-radius:8px;font-size:13px;color:#c3c9d6;line-height:1.7}
-  code{background:#0f1320;padding:2px 6px;border-radius:4px}
+  .sc{display:block;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;text-decoration:none;color:inherit;transition:.18s}
+  .sc:hover{transform:translateY(-3px);box-shadow:0 10px 26px rgba(0,0,0,.35)}
+  .sc-ok:hover{border-color:var(--ok)}
+  .sc-bad:hover{border-color:var(--err)}
+  .scrow{display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .sctitle{font-size:15.5px;font-weight:700}
+  .scsub{font-size:12.5px;color:var(--sub);margin:8px 0 12px}
+  .scstatus{font-size:12px;font-weight:700;padding:4px 11px;border-radius:20px;white-space:nowrap}
+  .scstatus.ok{background:rgba(61,220,151,.14);color:var(--ok)}
+  .scstatus.bad{background:rgba(255,107,129,.14);color:var(--err)}
+  .scbar{height:6px;background:var(--line);border-radius:6px;overflow:hidden}
+  .scbar i{display:block;height:100%;border-radius:6px}
+  .scnum{font-size:11.5px;color:var(--sub);margin-top:7px}
+  .note{margin-top:24px;padding:18px 20px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent2);border-radius:12px;font-size:13px;color:#c3cbef;line-height:1.9}
+  .note b{color:#f1f3ff}
+  code{background:#0d1120;padding:2px 7px;border-radius:5px;color:#b9c3ff;border:1px solid var(--line);font-size:12px}
 </style></head>
 <body>
-<header><h1>🤖 AI 测试官 · 离线三场景 Demo 总览</h1>
-<p>零依赖本地闭环：理解变更 → 规划选测 → 真实跑测 → 可决策报告。点击下方任一卡片查看详细报告。</p></header>
+<header>
+  <h1>🤖 AI 测试官 · 离线三场景 Demo 总览</h1>
+  <p>零依赖本地闭环：理解变更 → 规划选测 → 真实跑测 → 可决策报告。点击下方任一卡片查看详细报告。</p>
+  <div class="livebadge"><span class="lb-dot"></span>实时看板：另开终端执行 <code>node report/live-server.mjs</code> 后打开 <code>http://localhost:5177</code>，可实时观看 Think→Act→Observe 执行过程</div>
+</header>
 <main>
   <div class="grid">${cards}</div>
   <div class="note">

@@ -14,6 +14,8 @@ report/.mcp-req*.md
 report/pr-comment.md
 report/*.log
 report/*.txt
+# 实时看板事件流（运行时产物，看板服务器本身 report/live-server.mjs 保留追踪）
+report/.live-*.ndjson
 agent/.aio.out.txt
 agent/.debug-test.txt
 agent/.debug-smoke.txt

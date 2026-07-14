@@ -119,17 +119,17 @@ async function checkOnce() {
     title,
     `> 仓库：${report.meta.repo}　分支：${branch}`,
     `> 时间：${fmtTime(report.meta.generatedAt)}`,
-    `> 状态：**${status === 'unhealthy' ? `异常（${summary.fail} 失败 / ${summary.total} 总）` : `健康（${summary.pass} 通过 / ${summary.total} 总）`}**`,
+    `> 状态：**${status === 'unhealthy' ? `🐞 发现问题（${summary.fail} 个 / 共 ${summary.total} 项验证）` : `✅ 健康（${summary.pass} 项全部符合预期）`}**`,
   ];
   if (status === 'unhealthy') {
-    lines.push('', '**失败用例（前 10）：**');
+    lines.push('', `**AI 测试官捕获的问题（前 10）：**`);
     for (const f of failItems.slice(0, 10)) {
       lines.push(`- [${f.severity}] ${f.name}`);
       if (f.rootCause && f.rootCause !== '-') lines.push(`  \`${f.rootCause.slice(0, 160)}\``);
     }
     if (failItems.length > 10) lines.push(`- …其余 ${failItems.length - 10} 项`);
     if (impact?.selectionReason) lines.push('', `**选测：** ${impact.selectionReason}`);
-    lines.push('', '**建议：** 修复后复测通过方可合入/发布。详见 report/index.html');
+    lines.push('', `**建议：** 修复后复测通过方可合入/发布。详见 report/${outName}.html`);
   } else {
     lines.push('', '全部用例通过，无异常。');
   }
@@ -170,7 +170,7 @@ async function checkOnce() {
     lastPushAt: pushed ? report.meta.generatedAt : prev?.lastPushAt || null,
   }, null, 2), 'utf8');
 
-  console.log(`场景C 巡检完成：${status === 'unhealthy' ? '异常' : '健康'} ${summary.pass}通过/${summary.fail}失败 → ${note}`);
+  console.log(`场景C 巡检完成：${status === 'unhealthy' ? `🐞 发现 ${summary.fail} 个问题` : '✅ 健康'}（符合预期 ${summary.pass} / 共 ${summary.total} 项）→ ${note}`);
   return { status, needPush, pushed };
 }
 

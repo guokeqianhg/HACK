@@ -48,6 +48,18 @@ f:/HACK
 ## 场景 B · 自由文本需求的 AI 自主拆解
 `docs/requirement.md` 采用「`## 模块：` + `### 测试点`」的结构化约定便于精确核对，但真实 TAPD 需求/缺陷大多是无结构自由文本。当需求文本不满足该约定格式时（规则解析降级为弱兜底），引擎会自动让 LLM **直接读需求原文**自主拆解出具体、可验证的测试点，并尝试把每个测试点归属到仓库中真实存在的源码模块（找不到真实模块时留空，不编造路径），更贴近赛题「不给测试清单，AI 自己读懂需求拆场景」的要求；解析失败或未启用 LLM 时自动回退规则兜底结果，不阻断流程。
 
+## 实时执行看板（Think → Act → Observe 流式可视化）
+`report/*.html` 是跑完之后生成的静态可决策报告；若想在**执行过程中**实时看到「理解 → 规划 → 执行 → 报告」每一步（包括 ReAct Agent 真实的 Think→Act→Observe 循环轨迹），另开一个终端起实时看板：
+```bash
+node report/live-server.mjs           # 启动看板服务器（默认 http://localhost:5177，可用 --port 指定端口）
+```
+保持该进程运行，再在另一个终端正常执行 `node agent/run-test-officer.mjs ...` 或 `node agent/demo.mjs`，打开 `http://localhost:5177` 即可看到：
+- 按阶段（理解变更 / 选测策略 / ReAct 规划 / 执行验证 / AI 根因推理 / 自适应策略 / AI 生成回归测试 / 生成报告）逐步点亮的时间线；
+- ReAct 规划 Agent 真实调用 `get_diff` / `list_test_files` / `get_module_source` 等工具的完整 Think→Act→Observe 轨迹，逐条流式出现，而非等跑完才看到最终结论；
+- 跑完后自动汇总通过/失败统计，并提供「查看完整报告」跳转到对应的 `report-*.html`。
+
+实现零依赖（纯 `node:http` + Server-Sent Events，无需 WebSocket/第三方包）：执行引擎把每一步写成一行 NDJSON（`report/.live-<out>.ndjson`），看板服务器 tail 该文件并通过 SSE 推给浏览器；看板未启动也完全不影响主流程（写事件失败静默忽略），页面刷新/晚启动都能通过回放历史事件补看到从头的完整过程。
+
 ## 快速开始（核心零依赖、离线可跑）
 ```bash
 cd sample-app
