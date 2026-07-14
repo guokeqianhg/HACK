@@ -70,23 +70,30 @@ const args = process.argv.slice(2).reduce((m, a, i, arr) => {
 if (args.help) {
   console.log(`AI 测试官 · 执行引擎（理解 diff → 规划 → 真实跑测 → 报告）
 用法：
-  node agent/run-test-officer.mjs --repo <dir> --base <ref> --target <ref> --scenario <A|B|C>
+  node agent/run-test-officer.mjs --repo <dir> --base <ref> --target <ref> --scenario <A|B|C|D|E>
                                 [--requirement <json|md>] [--diff <file>] [--story <TAPD需求ID>] [--bug <TAPD缺陷ID>] [--out <name>] [--triggeredBy <text>]
                                 [--pr <MR合并请求IID>] [--pr-project <owner/repo>]
-                                [--webhook <url>]
+                                [--webhook <url>] [--merge <ref>]
 
 场景：
   A  代码改动驱动：diff 来源优先级 = 外部 --diff 文件 > 工蜂真实 MR diff（--pr + TGIT_TOKEN 直连 REST）> 本地 git diff
       → 精准选测 → 在目标分支真实跑测 → 结果回写 MR 评论（--pr）并推送企微（--webhook）
   B  需求驱动：读 requirement（本地 JSON/Markdown，或由 --story/--bug 直连 TAPD REST 拉取需求/缺陷）→ 需求覆盖度报告（默认 docs/requirement.md，回退 requirement-demo.json）
   C  持续巡检用：base==target 时为全量回归（实际由 cron-monitor 调用，异常经企微推送）
+  D  Bug 修复闭环验证：--bug <TAPD缺陷ID> 指定被修复的缺陷（也可用 --story 指定需求）→ 引擎读缺陷描述 → diff 分析修复分支 → 选测覆盖缺陷相关模块 + 改动文件
+      → 验证：① 缺陷是否已修复（关联用例是否 fail→pass）② 修复是否引入新回归 → 推企微/回写 MR
+  E  合并冲突检测：--merge <另一分支> → 引擎在 --base 上分别跑 --target 和 --merge，再跑临时 merge 结果
+      → 对比三组结果：在各自分支都通过、但 merge 后出现的新失败 = 语义冲突（git merge 检测不到的「改不同行但逻辑互相覆盖」）
+      → AI 根因告诉你两个分支各自改了什么、合并后哪个逻辑被覆盖了
 
 示例：
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A --diff report/.mcp-diff.txt
   node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A --pr 123 --pr-project owner/repo --webhook https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxx
   node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --requirement sample-app/docs/requirement.md
-  node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --story 100123 --triggeredBy "TAPD 需求 #100123 自动读走"`);
+  node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --story 100123 --triggeredBy "TAPD 需求 #100123 自动读走"
+  node agent/run-test-officer.mjs --repo sample-app --base main --target feature/fix-coupon-bug --scenario D --bug 100456 --triggeredBy "TAPD 缺陷 #100456 修复验证"
+  node agent/run-test-officer.mjs --repo sample-app --base main --target feature/a --merge feature/b --scenario E`);
   process.exit(0);
 }
 
@@ -97,9 +104,13 @@ const scenario = args.scenario || 'A';
 const triggeredBy = args.triggeredBy || `分支 ${target} 对比 ${base}`;
 // MCP 注入口：场景 A 可由 TGit/工蜂 MCP 取回 MR diff 后通过 --diff 直接喂入
 const diffFile = args.diff || '';
+// 场景 D：关联 TAPD 缺陷 ID（语义：被修复的缺陷）
+const fixBugId = args.bug || '';
+// 场景 E：合并冲突检测的另一个待合并分支
+const mergeBranch = args.merge || '';
 
-if (!['A', 'B', 'C'].includes(scenario)) {
-  console.error(`❌ 非法 --scenario "${scenario}"，仅支持 A / B / C（用 --help 查看用法）`);
+if (!['A', 'B', 'C', 'D', 'E'].includes(scenario)) {
+  console.error(`❌ 非法 --scenario "${scenario}"，仅支持 A / B / C / D / E（用 --help 查看用法）`);
   process.exit(1);
 }
 
@@ -491,6 +502,53 @@ async function runInWorktree(targetRef, testFiles, opts = {}) {
       ui: skipUi ? '' : JSON.stringify(uiOut, null, 2),
     },
   };
+}
+
+// ---------- 场景 E · 临时 merge 分支并全量跑测 ----------
+// 在 baseRef 上分别 merge targetRef 和 mergeRef，得到一个临时 merge 提交，然后全量跑测。
+// 返回合并后的测试结果 + merge diff（供 AI 冲突根因分析）。
+async function runMergeTest({ baseRef, targetRef, mergeRef, testFiles }) {
+  const wt = path.join(os.tmpdir(), `aio-merge-${Date.now()}`);
+  let mergeDiff = '';
+  try {
+    // 1) 在 baseRef 上创建临时 worktree
+    await git(repoDir, 'worktree', 'add', '--detach', wt, baseRef);
+    // 2) 依次 merge 两个分支（--no-edit 避免编辑器交互）
+    // 先 merge target，再 merge mergeRef
+    const gitInWt = (args) => run(repoDir, 'git', ['-C', wt, ...args]);
+    // merge targetRef
+    const merge1 = await gitInWt(['merge', '--no-edit', '--no-ff', targetRef]);
+    if (merge1.code !== 0) {
+      return { results: [{ name: '合并失败', type: 'merge', status: 'fail', severity: 'critical', rootCause: `无法合并 ${targetRef} 到 ${baseRef}：${merge1.out.slice(0, 200)}`, repro: `git merge ${targetRef}`, testFile: '' }], mergeDiff: merge1.out };
+    }
+    // merge mergeRef
+    const merge2 = await gitInWt(['merge', '--no-edit', '--no-ff', mergeRef]);
+    if (merge2.code !== 0) {
+      // 合并冲突（文本冲突，git 已检测到，这是预期内的情况之一）
+      return { results: [{ name: `合并冲突（${targetRef} + ${mergeRef}）`, type: 'merge', status: 'fail', severity: 'high', rootCause: `git 文本冲突：${merge2.out.slice(0, 200)}`, repro: `git merge ${mergeRef}`, testFile: '' }], mergeDiff: merge2.out };
+    }
+    // 3) 获取 merge diff（相对 base）
+    const diffOut = await gitInWt(['diff', `${baseRef}..HEAD`, '--', '.']);
+    mergeDiff = diffOut.out || '';
+    // 4) 全量跑测
+    const sutInWt = path.join(wt, path.relative(ROOT, repoDir));
+    const wtTestFiles = testFiles.map((f) => path.join(sutInWt, path.relative(repoDir, f)));
+    const runTests = wtTestFiles.length ? wtTestFiles : globSync(path.join(sutInWt, 'tests', '*.test.js'));
+    const nameFileMap = buildTestNameFileMap(runTests);
+    const testOut = await run(sutInWt, 'node', ['--test', '--test-reporter=spec', ...runTests]);
+    const smokeOut = await run(sutInWt, 'node', ['smoke/api-smoke.mjs']);
+    const results = [...parseNodeTest(testOut.out, nameFileMap), ...parseApiSmoke(smokeOut.out)];
+    // 尝试 UI 冒烟
+    try {
+      const uiResults = await runUiSmoke(sutInWt);
+      results.push(...uiResults);
+    } catch {
+      results.push({ name: '前端 UI 冒烟（Playwright）', type: 'ui', status: 'skip', severity: '-', rootCause: 'UI 链路跳过（Playwright 未安装或异常）', repro: 'playwright test', testFile: 'ui-smoke.spec.js' });
+    }
+    return { results, mergeDiff };
+  } finally {
+    await git(repoDir, 'worktree', 'remove', '--force', wt).catch(() => {});
+  }
 }
 
 // ---------- 4. 自适应策略（P1）：首轮失败后，根据结果动态调整后续策略 ----------
@@ -1049,9 +1107,21 @@ function computeCoverage(req, results, repoDir) {
 }
 
 // 统一生成「AI 测试官过程时间线」，供 HTML 可视化（不依赖业务语义）
-function buildProcess({ scenario, req, impact, sel, summary, adaptive, generatedTests = [] }) {
+function buildProcess({ scenario, req, impact, sel, summary, adaptive, generatedTests = [], fixVerdict, semanticConflictsCount = 0 }) {
   const phases = [];
-  if (scenario === 'B') {
+  if (scenario === 'D') {
+    phases.push({ title: '① 读缺陷/需求', detail: `${req.id} · ${req.title}`, status: 'done' });
+    phases.push({ title: '② 分析修复分支 diff', detail: `${impact.changedFiles.length} 个文件改动`, status: 'done' });
+    phases.push({ title: '③ 选测（改动 + 缺陷关联模块）', detail: impact.selectionReason || sel.reason, status: 'done' });
+    phases.push({ title: '④ 真实跑测', detail: `通过 ${summary.pass} / 失败 ${summary.fail}`, status: summary.fail ? 'warn' : 'done' });
+    if (fixVerdict) {
+      phases.push({ title: '⑤ 修复就绪度判定', detail: fixVerdict.verdict === 'fixed' ? '✅ 修复通过，无回归' : `⚠️ ${fixVerdict.reason}`, status: fixVerdict.verdict === 'fixed' ? 'done' : 'warn' });
+    }
+  } else if (scenario === 'E') {
+    phases.push({ title: '① 基线跑测', detail: `${impact.mergeContext?.target || ''}: ${impact.mergeContext?.resultsA?.pass || 0}通过 / ${impact.mergeContext?.mergeBranch || ''}: ${impact.mergeContext?.resultsB?.pass || 0}通过`, status: 'done' });
+    phases.push({ title: '② 模拟合并 & 全量跑测', detail: `通过 ${summary.pass} / 失败 ${summary.fail}`, status: summary.fail ? 'warn' : 'done' });
+    phases.push({ title: '③ 语义冲突检测', detail: semanticConflictsCount ? `🚨 ${semanticConflictsCount} 个语义冲突` : '✅ 无语义冲突', status: semanticConflictsCount ? 'error' : 'done' });
+  } else if (scenario === 'B') {
     phases.push({ title: '① 读需求/缺陷', detail: `${req.id} · ${req.title}`, status: 'done' });
     const splitDetail = `${req.points.length} 个测试点 / 命中 ${impact.srcFiles.length} 个模块` + (impact.requirementAiExtracted ? '（AI 自主拆解：需求无预设格式，由 LLM 直读原文拆场景）' : '');
     phases.push({ title: '② 拆解测试点', detail: splitDetail, status: 'done' });
@@ -1079,11 +1149,13 @@ function buildProcess({ scenario, req, impact, sel, summary, adaptive, generated
       status: 'done',
     });
   }
-  phases.push({
-    title: '③ 选测策略',
-    detail: sel.narrowed ? `🎯 精准选测 ${sel.testFiles.length} 个` : `⚠️ 全量回退 ${sel.testFiles.length} 个`,
-    status: 'done',
-  });
+  if (sel) {
+    phases.push({
+      title: '③ 选测策略',
+      detail: sel.narrowed ? `🎯 精准选测 ${sel.testFiles.length} 个` : `⚠️ 全量回退 ${sel.testFiles.length} 个`,
+      status: 'done',
+    });
+  }
   phases.push({
     title: '④ 执行验证',
     detail: `通过 ${summary.pass} / 失败 ${summary.fail}`,
@@ -1561,6 +1633,300 @@ async function main() {
     console.log(`\n✅ 场景 B 完成：需求覆盖 ${covered} 项 / 缺口 ${gaps} 项 / AI 测试官发现 ${failingPts} 个不达标问题`);
     console.log(perf());
     liveEmit.done({ summary: report.summary, reportFile: `${outName}.html` });
+    return;
+  }
+
+  // --- 场景 D：Bug 修复闭环验证 ---
+  // 输入：--bug <TAPD缺陷ID>（或 --story 需求ID），--target <修复分支>
+  // 引擎：① 读缺陷描述（TAPD 直连或本地 --requirement 回退）
+  //       ② diff 分析修复分支相对 base 的改动
+  //       ③ 选测覆盖「改动文件 + 缺陷描述中提及的功能模块」
+  //       ④ worktree 真实跑测
+  //       ⑤ AI 判定：缺陷是否已修复（关联用例 fail→pass）+ 是否引入新回归
+  //       ⑥ 生成「修复就绪度」报告，推企微 / 回写 MR
+  if (scenario === 'D') {
+    liveEmit.phase('understand', '① 理解缺陷 & 修复改动', '读缺陷描述 + 分析修复分支 diff');
+    // 1) 读缺陷描述：TAPD 直连优先，否则本地 requirement 文件
+    const defMd = path.join(repoDir, 'docs', 'requirement.md');
+    let reqPathForBug = args.requirement || (fs.existsSync(defMd) ? defMd : path.join(repoDir, 'docs', 'requirement-demo.json'));
+    let bugSource = '';
+    const tapdWs = process.env.TAPD_WORKSPACE_ID || '';
+    if (fixBugId && tapdWs) {
+      try {
+        const md = await fetchTAPDBug({ bugId: fixBugId, workspaceId: tapdWs, apiBase: TAPD_API_BASE });
+        const abs = path.join(ROOT, 'report', `.mcp-req-bug-${fixBugId}.md`);
+        fs.writeFileSync(abs, md, 'utf8');
+        reqPathForBug = abs;
+        bugSource = `TAPD 真实缺陷 #${fixBugId}`;
+        console.log(`   🌐 已从 TAPD 拉取缺陷 #${fixBugId}`);
+      } catch (e) {
+        console.warn(`⚠️ TAPD 缺陷拉取失败（${e.message}），回退本地需求文件`);
+      }
+    } else if (args.story && tapdWs) {
+      try {
+        const md = await fetchTAPDStory({ storyId: args.story, workspaceId: tapdWs, apiBase: TAPD_API_BASE });
+        const abs = path.join(ROOT, 'report', `.mcp-req-story-${args.story}.md`);
+        fs.writeFileSync(abs, md, 'utf8');
+        reqPathForBug = abs;
+        bugSource = `TAPD 真实需求 #${args.story}`;
+        console.log(`   🌐 已从 TAPD 拉取需求 #${args.story}`);
+      } catch (e) {
+        console.warn(`⚠️ TAPD 需求拉取失败（${e.message}），回退本地需求文件`);
+      }
+    }
+    const req = readRequirement(reqPathForBug);
+    if (bugSource) req.source = bugSource;
+    liveEmit({ type: 'log', phase: 'understand', detail: `已读缺陷/需求 ${req.id} · ${req.title}` });
+
+    // 2) diff 分析修复分支
+    const diffText = await git(repoDir, 'diff', `${base}..${target}`, '--', '.');
+    const impact = analyzeDiff(diffText);
+    impact.diffSource = `git diff ${base}..${target}`;
+    impact.scope = `Bug 修复验证（场景 D）：${req.title}`;
+    impact.bugContext = { id: req.id, title: req.title, source: req.source };
+    // AI 语义理解修复改动意图（并行，不阻塞）
+    const semanticP = isLLMEnabled() ? semanticAnalyze(diffText, impact).catch(() => null) : Promise.resolve(null);
+    console.log(`   修复分支 ${target} 改动：${impact.changedFiles.join(', ') || '(无)'}`);
+    liveEmit.phase('understand', '① 理解缺陷 & 修复改动', `缺陷 ${req.id} · ${impact.changedFiles.length} 个文件改动`, 'done');
+
+    // 3) 选测：改动文件 + 缺陷描述中涉及的功能模块（取并集）
+    const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
+    // 把缺陷涉及的模块也加入 changedFiles，保证即使没直接改到的相关模块也会被测
+    const bugModules = req.affectedModules || [];
+    const rel = path.relative(gitRoot, repoDir);
+    const allChanged = [...new Set([...impact.changedFiles, ...bugModules.map((m) => path.join(rel, m))])];
+    const sel = selectTests({ repoDir, gitRoot, changedFiles: allChanged });
+    impact.affectedTests = sel.testFiles.map((f) => path.relative(repoDir, f));
+    impact.narrowed = sel.narrowed;
+    impact.selectionReason = sel.reason + (bugModules.length ? ` + 缺陷关联模块 ${bugModules.length} 个` : '');
+    console.log(`   ${sel.narrowed ? '🎯 精准选测' : '⚠️ 全量回退'}：${sel.reason}（含缺陷关联模块 ${bugModules.length} 个）`);
+    liveEmit.phase('select', '② 选测策略', impact.selectionReason, 'done');
+
+    // 4) worktree 真实跑测
+    console.log('🧪 执行验证（worktree 真实跑测）…');
+    liveEmit.phase('execute', '③ 执行验证', `worktree 真实跑测 ${sel.testFiles.length} 个测试文件…`);
+    const run1 = await runInWorktree(target, sel.testFiles);
+    const { unit, api, ui } = run1;
+    const results = [...unit, ...api, ...ui];
+    liveEmit.phase('execute', '③ 执行验证', `完成：通过 ${results.filter((r) => r.status === 'pass').length} / 失败 ${results.filter((r) => r.status === 'fail').length}`, 'done');
+
+    // AI 语义理解（此时应已完成）
+    impact.llmUnderstand = await semanticP;
+
+    // 5) AI 判定：缺陷是否已修复 + 是否引入新回归
+    const failing = results.filter((r) => r.status === 'fail');
+    const officerCtxD = buildOfficerCtx({ repoDir, diffText, lastUnitRaw: run1.raw.unit, sel });
+
+    // 根因推理
+    if (failing.length) {
+      liveEmit.phase('rootcause', '④ AI 根因推理', `分析 ${failing.length} 个失败用例…`);
+      const causes = await llmRootCause(diffText, failing, officerCtxD);
+      for (const r of failing) if (causes[r.name]) r.rootCause = causes[r.name];
+      liveEmit.phase('rootcause', '④ AI 根因推理', `完成 ${failing.length} 个失败用例的语义归因`, 'done');
+    }
+
+    // 修复就绪度判定（LLM 兜底，失败时走确定性启发式）
+    let fixVerdict = null;
+    if (isLLMEnabled()) {
+      liveEmit.phase('verdict', '⑤ 修复就绪度判定', 'AI 判定缺陷是否已修复、是否引入新回归…');
+      try {
+        const bugText = readTextRobust(reqPathForBug);
+        const failingSummary = failing.map((r) => `- ${r.name}: ${r.rootCause || '(无根因)'}`).join('\n') || '（无失败用例）';
+        const { content } = await chat({
+          messages: [{
+            role: 'system',
+            content: `你是「AI 测试官」的修复验证 Agent。给定一个被修复的缺陷描述、修复分支的改动 diff、以及跑测结果，
+请输出一个 JSON（不要任何额外文字）判断修复是否成功：
+{"verdict":"fixed"|"partial"|"not_fixed"|"regressed","reason":"一句话原因","regressionCount":<新引入的回归失败数>,"fixedEvidence":"哪些用例从 fail 变 pass 了（修复证据）","regressionList":["新引入的回归失败用例名"]}`,
+          }, {
+            role: 'user',
+            content: `缺陷描述：${String(bugText).slice(0, 2000)}\n\n修复分支 diff（${base}..${target}）：\n${String(diffText).slice(0, 2000)}\n\n跑测结果（${results.length} 个用例，${failing.length} 个失败）：\n${failingSummary}`,
+          }],
+          temperature: 0.1, maxTokens: 600, model: fastModel(),
+        });
+        fixVerdict = extractJSON(content);
+      } catch (e) {
+        console.warn('⚠️ AI 修复判定失败，走确定性启发式：', e.message);
+      }
+    }
+    if (!fixVerdict) {
+      fixVerdict = {
+        verdict: failing.length === 0 ? 'fixed' : 'not_fixed',
+        reason: failing.length === 0 ? '所有受影响测试通过，未发现回归' : `存在 ${failing.length} 个失败用例，修复可能不完整或引入回归`,
+        regressionCount: failing.length,
+        fixedEvidence: failing.length === 0 ? '受影响模块全部通过' : '',
+        regressionList: failing.map((r) => r.name),
+      };
+    }
+    liveEmit.phase('verdict', '⑤ 修复就绪度判定', fixVerdict.verdict === 'fixed' ? '✅ 修复通过' : '⚠️ 存在问题', 'done');
+
+    // 6) 生成报告
+    const plan = [
+      { step: `读缺陷描述 ${req.id}`, why: `缺陷：${req.title}` },
+      { step: `分析修复分支 diff ${base}..${target}`, why: impact.scope },
+      { step: `选测（改动 + 缺陷关联模块）`, why: sel.reason },
+      { step: `真实跑测（${sel.testFiles.length} 个测试文件）`, why: `通过 ${results.filter((r) => r.status === 'pass').length} / 失败 ${failing.length}` },
+      { step: `修复就绪度判定`, why: fixVerdict.verdict === 'fixed' ? '✅ 修复通过，无回归' : `⚠️ ${fixVerdict.reason}` },
+    ];
+    const report = {
+      meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
+      impact,
+      plan,
+      results,
+      fixVerdict,
+      bugContext: { id: req.id, title: req.title, source: req.source },
+      process: buildProcess({ scenario, req, impact, sel, summary: summarize(results), fixVerdict }),
+      summary: summarize(results),
+    };
+    fs.writeFileSync(reportJsonPath, JSON.stringify(report, null, 2), 'utf8');
+    console.log(`📝 已写 ${reportJsonPath}`);
+    liveEmit.phase('report', '⑥ 生成可决策报告', `report/${outName}.html`);
+    await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
+    liveEmit.phase('report', '⑥ 生成可决策报告', `report/${outName}.html`, 'done');
+    await pushToWeChat({ report });
+    const verdictText = fixVerdict.verdict === 'fixed' ? '✅ 修复通过，无回归' : `⚠️ ${fixVerdict.verdict}：${fixVerdict.reason}`;
+    console.log(`\n🔧 场景 D 完成：${verdictText}`);
+    console.log(perf());
+    liveEmit.done({ summary: report.summary, reportFile: `${outName}.html`, fixVerdict });
+    return;
+  }
+
+  // --- 场景 E：合并冲突检测（语义冲突）---
+  // 输入：--base <baseRef> --target <分支A> --merge <分支B>
+  // 引擎：① 分别在 target 和 merge 分支上跑全量测试（基线）
+  //       ② 建临时 merge 提交（git merge --no-commit），跑全量测试
+  //       ③ 对比：在各自分支都通过、但 merge 后新出现的失败 = 语义冲突
+  //       ④ AI 解释：两个分支各自改了什么、合并后哪个逻辑被覆盖了
+  if (scenario === 'E') {
+    if (!mergeBranch) {
+      console.error('❌ 场景 E 需要 --merge <另一分支>（指定与 --target 合并的目标分支）');
+      process.exit(1);
+    }
+    liveEmit.phase('understand', '① 基线跑测（两个分支各自独立跑）', `在 ${target} 和 ${mergeBranch} 上分别全量回归…`);
+
+    // 1) 两个分支各自全量回归
+    const allTestObjs = listAllTests(repoDir);
+    const allTests = allTestObjs.map((t) => t.abs);
+    console.log(`📋 全量测试集：${allTests.length} 个测试文件`);
+    console.log(`   ▶ 分支 ${target} 独立跑测…`);
+    liveEmit({ type: 'log', phase: 'understand', detail: `▶ 分支 ${target} 独立跑测（${allTests.length} 个文件）` });
+    const runA = await runInWorktree(target, allTests);
+    const resultsA = [...runA.unit, ...runA.api, ...runA.ui];
+    const passA = new Set(resultsA.filter((r) => r.status === 'pass').map((r) => r.name));
+    console.log(`      ${target}：通过 ${passA.size} / 总 ${resultsA.length}`);
+
+    console.log(`   ▶ 分支 ${mergeBranch} 独立跑测…`);
+    liveEmit({ type: 'log', phase: 'understand', detail: `▶ 分支 ${mergeBranch} 独立跑测（${allTests.length} 个文件）` });
+    const runB = await runInWorktree(mergeBranch, allTests);
+    const resultsB = [...runB.unit, ...runB.api, ...runB.ui];
+    const passB = new Set(resultsB.filter((r) => r.status === 'pass').map((r) => r.name));
+    console.log(`      ${mergeBranch}：通过 ${passB.size} / 总 ${resultsB.length}`);
+    liveEmit.phase('understand', '① 基线跑测', `${target}: ${passA.size}通过 / ${mergeBranch}: ${passB.size}通过`, 'done');
+
+    // 2) 临时 merge 并跑测
+    liveEmit.phase('execute', '② 模拟合并 & 全量跑测', `git merge ${target} + ${mergeBranch} → 跑全量…`);
+    console.log('🔀 模拟合并两个分支并跑全量…');
+    const { results: resultsMerge, mergeDiff } = await runMergeTest({
+      baseRef: base, targetRef: target, mergeRef: mergeBranch, testFiles: allTests,
+    });
+    const failMerge = resultsMerge.filter((r) => r.status === 'fail');
+    const passMerge = new Set(resultsMerge.filter((r) => r.status === 'pass').map((r) => r.name));
+    console.log(`      merge：通过 ${passMerge.size} / 失败 ${failMerge.length} / 总 ${resultsMerge.length}`);
+    liveEmit.phase('execute', '② 模拟合并 & 全量跑测', `通过 ${passMerge.size} / 失败 ${failMerge.length}`, 'done');
+
+    // 3) 对比：找出语义冲突
+    // 语义冲突 = 在 A 通过 且 在 B 通过，但 merge 后失败
+    const semanticConflicts = failMerge.filter((r) => passA.has(r.name) && passB.has(r.name));
+    // 纯回归失败 = 在 A 或 B 已失败，merge 后继续失败（不是语义冲突，是已知问题）
+    const preExistingFail = failMerge.filter((r) => !passA.has(r.name) || !passB.has(r.name));
+
+    console.log(`\n🔍 语义冲突检测结果：`);
+    console.log(`   🚨 语义冲突（A/B 各自通过、合并后新失败）：${semanticConflicts.length} 个`);
+    for (const sc of semanticConflicts) {
+      console.log(`      - ${sc.name}：${sc.rootCause || '(待 AI 分析)'}`);
+    }
+    if (preExistingFail.length) {
+      console.log(`   ⚠️ 已知失败（A 或 B 已存在，非合并引入）：${preExistingFail.length} 个`);
+    }
+    if (semanticConflicts.length === 0) {
+      console.log(`   ✅ 未检测到语义冲突！`);
+    }
+    liveEmit.phase('conflict', '③ 冲突检测', semanticConflicts.length ? `🚨 发现 ${semanticConflicts.length} 个语义冲突` : '✅ 无语义冲突', semanticConflicts.length ? 'warn' : 'done');
+
+    // 4) AI 解释语义冲突
+    let conflictAnalysis = null;
+    if (semanticConflicts.length && isLLMEnabled()) {
+      liveEmit.phase('rootcause', '④ AI 冲突根因分析', `分析 ${semanticConflicts.length} 个语义冲突…`);
+      try {
+        const diffA = await git(repoDir, 'diff', `${base}..${target}`, '--', '.');
+        const diffB = await git(repoDir, 'diff', `${base}..${mergeBranch}`, '--', '.');
+        const conflictNames = semanticConflicts.map((r) => r.name).join('、');
+        const conflictDetail = semanticConflicts.map((r) => `- ${r.name}：${r.rootCause || '根因未知'}`).join('\n');
+        const { content } = await chat({
+          messages: [{
+            role: 'system',
+            content: `你是「AI 测试官」的语义冲突分析 Agent。给定两个分支各自相对 base 的 diff 和合并后出现的新失败用例，
+请分析为什么会出现语义冲突（两个分支各自改了什么、合并后哪个逻辑被覆盖/冲突了）。
+输出一个 JSON（不要任何额外文字）：{"summary":"一句话总结冲突原因","conflicts":[{"test":"失败用例名","branchAChange":"分支A改了什么","branchBChange":"分支B改了什么","whyConflict":"合并后为什么冲突"}]}`,
+          }, {
+            role: 'user',
+            content: `分支 ${target} 的 diff（${base}..${target}）：\n${String(diffA).slice(0, 2000)}\n\n分支 ${mergeBranch} 的 diff（${base}..${mergeBranch}）：\n${String(diffB).slice(0, 2000)}\n\n合并后语义冲突用例（${semanticConflicts.length} 个）：\n${conflictDetail}`,
+          }],
+          temperature: 0.1, maxTokens: 1200, model: fastModel(),
+        });
+        conflictAnalysis = extractJSON(content) || { summary: `检测到 ${semanticConflicts.length} 个语义冲突（AI 分析未产出结构化结果）`, conflicts: [] };
+        console.log(`   🤖 AI 冲突分析：${conflictAnalysis.summary || '（无总结）'}`);
+      } catch (e) {
+        console.warn('⚠️ AI 冲突分析失败：', e.message);
+        conflictAnalysis = { summary: `检测到 ${semanticConflicts.length} 个语义冲突（AI 分析不可用）`, conflicts: [] };
+      }
+      liveEmit.phase('rootcause', '④ AI 冲突根因分析', conflictAnalysis?.summary || '完成', 'done');
+    } else if (semanticConflicts.length) {
+      conflictAnalysis = { summary: `检测到 ${semanticConflicts.length} 个语义冲突（未启用 LLM，无法自动分析根因）`, conflicts: [] };
+    }
+
+    // 5) 生成报告
+    const impact = {
+      changedFiles: [], // 场景 E 不基于 diff 选测，而是全量
+      changedFunctions: [],
+      scope: `合并冲突检测（场景 E）：${target} + ${mergeBranch}`,
+      mergeContext: { base, target, mergeBranch, mergeDiff },
+      srcFiles: [],
+      testFiles: [],
+      otherFiles: [],
+    };
+    const plan = [
+      { step: `基线：${target} 独立全量`, why: `通过 ${passA.size} / 总 ${resultsA.length}` },
+      { step: `基线：${mergeBranch} 独立全量`, why: `通过 ${passB.size} / 总 ${resultsB.length}` },
+      { step: `模拟 merge：${target} + ${mergeBranch}`, why: `通过 ${passMerge.size} / 失败 ${failMerge.length}` },
+      { step: `语义冲突检测`, why: semanticConflicts.length ? `发现 ${semanticConflicts.length} 个冲突` : '无冲突' },
+    ];
+    if (conflictAnalysis) plan.push({ step: 'AI 冲突根因分析', why: conflictAnalysis.summary });
+
+    const report = {
+      meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
+      impact,
+      plan,
+      results: resultsMerge,
+      mergeContext: { base, target, mergeBranch, resultsA: summarize(resultsA), resultsB: summarize(resultsB) },
+      semanticConflicts: semanticConflicts.map((r) => ({ name: r.name, rootCause: r.rootCause || '', testFile: r.testFile || '' })),
+      preExistingFail: preExistingFail.map((r) => ({ name: r.name, rootCause: r.rootCause || '' })),
+      conflictAnalysis,
+      process: buildProcess({ scenario, impact, summary: summarize(resultsMerge), semanticConflictsCount: semanticConflicts.length }),
+      summary: summarize(resultsMerge),
+    };
+    fs.writeFileSync(reportJsonPath, JSON.stringify(report, null, 2), 'utf8');
+    console.log(`📝 已写 ${reportJsonPath}`);
+    liveEmit.phase('report', '⑤ 生成可决策报告', `report/${outName}.html`);
+    await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
+    liveEmit.phase('report', '⑤ 生成可决策报告', `report/${outName}.html`, 'done');
+    await pushToWeChat({ report });
+    const summaryText = semanticConflicts.length
+      ? `\n🚨 场景 E 完成：检测到 ${semanticConflicts.length} 个语义冲突（${target} + ${mergeBranch} 合并后引入），${conflictAnalysis?.summary || ''}`
+      : `\n✅ 场景 E 完成：未检测到语义冲突，${target} 与 ${mergeBranch} 合并安全`;
+    console.log(summaryText);
+    console.log(perf());
+    liveEmit.done({ summary: report.summary, reportFile: `${outName}.html`, semanticConflicts: semanticConflicts.length });
     return;
   }
 
