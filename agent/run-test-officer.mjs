@@ -259,7 +259,29 @@ function run(cwd, cmd, cmdArgs, opts = {}) {
   });
 }
 
-function parseNodeTest(out) {
+// 静态构建「用例名 → 所属测试文件 basename」映射：直接扫描测试文件源码里的 test('name', ...) 调用。
+// 用途：node --test 的 spec reporter 只在失败用例的堆栈行里带文件路径，通过用例完全没有文件归属信息，
+// 导致场景 B 覆盖度证据收集（gatherCoverageEvidence 按 testFile 过滤关联测试）对通过用例总是拿不到证据，
+// AI 语义判定因此误判为 untested。静态扫描不依赖 reporter 输出格式，对现有失败用例的 testFile 提取逻辑无影响（仅补全缺失项）。
+function buildTestNameFileMap(testFilesAbs) {
+  const map = new Map();
+  for (const abs of testFilesAbs || []) {
+    let src;
+    try {
+      src = fs.readFileSync(abs, 'utf8');
+    } catch {
+      continue;
+    }
+    const base = path.basename(abs);
+    for (const m of src.matchAll(/\btest\(\s*['"`]((?:[^'"`\\]|\\.)*)['"`]/g)) {
+      const name = m[1].replace(/\\(['"`\\])/g, '$1');
+      if (!map.has(name)) map.set(name, base);
+    }
+  }
+  return map;
+}
+
+function parseNodeTest(out, nameFileMap = new Map()) {
   const results = [];
   const failByName = new Map();
   const seen = new Set();
@@ -270,7 +292,7 @@ function parseNodeTest(out) {
       const name = line.slice(2).split(' (')[0].trim();
       if (!seen.has(name)) {
         seen.add(name);
-        results.push({ name, type: 'unit', status: 'pass', severity: '-', rootCause: '-', repro: 'node --test' });
+        results.push({ name, type: 'unit', status: 'pass', severity: '-', rootCause: '-', repro: 'node --test', testFile: nameFileMap.get(name) || '' });
       }
       lastFailName = null;
     } else if (/^✖ /.test(line)) {
@@ -282,7 +304,7 @@ function parseNodeTest(out) {
       lastFailName = name;
       if (!seen.has(name)) {
         seen.add(name);
-        const r = { name, type: 'unit', status: 'fail', severity: 'high', rootCause: '', repro: 'node --test', testFile: '' };
+        const r = { name, type: 'unit', status: 'fail', severity: 'high', rootCause: '', repro: 'node --test', testFile: nameFileMap.get(name) || '' };
         failByName.set(name, r);
         results.push(r);
       }
@@ -428,6 +450,7 @@ async function runInWorktree(targetRef, testFiles, opts = {}) {
   const { skipUnit = false, skipApi = false, skipUi = false } = opts;
   const wt = path.join(os.tmpdir(), `aio-${Date.now()}`);
   let testOut, smokeOut, uiOut = [];
+  let nameFileMap = new Map();
   try {
     await git(repoDir, 'worktree', 'add', '--detach', wt, targetRef);
     const sutInWt = path.join(wt, path.relative(ROOT, repoDir)); // worktree 含整个仓库树，SUT 在 wt/<相对路径>
@@ -446,12 +469,14 @@ async function runInWorktree(targetRef, testFiles, opts = {}) {
         uiOut = [{ name: '前端 UI 冒烟（Playwright）', type: 'ui', status: 'skip', severity: '-', rootCause: `UI 链路执行异常已忽略：${e.message}`, repro: 'playwright test smoke/ui-smoke.spec.js', testFile: 'ui-smoke.spec.js' }];
       }
     }
+    // 必须在 worktree 删除前构建「用例名→文件名」映射（parseNodeTest 需要读测试文件源码）
+    if (!skipUnit) nameFileMap = buildTestNameFileMap(runTests);
   } finally {
     // 无论成功或失败都清理 worktree，避免 detached 分支/工作树残留污染仓库
     await git(repoDir, 'worktree', 'remove', '--force', wt).catch(() => {});
   }
   return {
-    unit: skipUnit ? [] : parseNodeTest(testOut.out),
+    unit: skipUnit ? [] : parseNodeTest(testOut.out, nameFileMap),
     api: skipApi ? [] : parseApiSmoke(smokeOut.out),
     ui: skipUi ? [] : uiOut,
     // 保留原始输出：供 AI 测试官 Agent 的 get_failure_log 工具抽取失败用例完整日志/堆栈
@@ -614,6 +639,46 @@ async function fixGen(system, prevAnswer, feedback) {
 // 或运行报错，则把错误回灌给模型修复（最多 1 轮）。最终只保留"在缺陷分支失败=能抓住 bug"的测试。
 // 关键提速：失败日志/被测源码/同目录测试 引擎本就持有，直接内联进 prompt（不再走 ReAct 工具循环）；
 // 多个候选用例并行生成（Promise.all），每个仅 1 次草稿 + 最多 1 次修复。
+//
+// 去重（防止 tests/ 目录无限膨胀）：同一失败用例反复触发生成时，LLM 每次取的文件名/措辞略有不同，
+// 若不加约束会不断产出"断言完全等价"的新文件。这里在调用 LLM 前先扫描已有 generated-*.test.js，
+// 若已存在"针对同一被测模块 + 用例名语义等价"的回归测试，直接复用（不再新增/不再调用模型）。
+function normalizeForDedup(s) {
+  return String(s || '')
+    .replace(/[（(].*?[）)]/g, '') // 去掉「（正确预期）」类修饰后缀，避免同义不同文案被误判为不同用例
+    .replace(/[\s:：,，.。、\-]/g, '')
+    .toLowerCase();
+}
+
+function findExistingGeneratedTest(repoDir, moduleRel, failName) {
+  const dir = path.join(repoDir, 'tests');
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => /^generated-.*\.test\.js$/.test(f));
+  } catch {
+    return null;
+  }
+  const targetNorm = normalizeForDedup(failName);
+  if (!targetNorm) return null;
+  const moduleBase = moduleRel ? path.basename(moduleRel).replace(/\.[mc]?js$/, '') : '';
+  for (const f of files) {
+    let src;
+    try {
+      src = fs.readFileSync(path.join(dir, f), 'utf8');
+    } catch {
+      continue;
+    }
+    // 模块归属过滤（已知模块时才校验；未知模块不作为过滤条件，避免漏判）
+    if (moduleBase && !new RegExp(`['"\`][^'"\`]*${moduleBase}(?:\\.[mc]?js)?['"\`]`).test(src)) continue;
+    const names = [...src.matchAll(/test\(\s*['"`]([^'"`]+)['"`]/g)].map((m) => m[1]);
+    for (const n of names) {
+      const nNorm = normalizeForDedup(n);
+      if (nNorm && (nNorm.includes(targetNorm) || targetNorm.includes(nNorm))) return f;
+    }
+  }
+  return null;
+}
+
 async function generateRegressionTests({ target, failing, ctx }) {
   const out = [];
   if (!isLLMEnabled() || !failing.length) return out;
@@ -622,6 +687,21 @@ async function generateRegressionTests({ target, failing, ctx }) {
 
   const jobs = candidates.map(async (f) => {
     const moduleRel = moduleUnderTest(repoDir, path.resolve(repoDir, 'tests', f.testFile));
+
+    // 去重命中：已有等价回归测试守卫，直接复用，不再新增文件、不再调用模型
+    const existingFile = findExistingGeneratedTest(repoDir, moduleRel, f.name);
+    if (existingFile) {
+      console.log(`   ♻️ 已存在等价回归测试 ${existingFile}，复用（跳过重复生成）`);
+      return {
+        name: f.name,
+        fileName: existingFile,
+        targetModule: moduleRel || '',
+        asserts: '（复用已有回归测试，未重复生成）',
+        status: 'existing',
+        path: path.join('tests', existingFile),
+      };
+    }
+
     const moduleSrc = moduleRel ? ctx.getModuleSource(moduleRel) : '';
     const testSrc = ctx.readTestFile(path.join('tests', f.testFile));
     const system = `你是「AI 测试官」的测试生成 Agent。给定一条失败用例、其真实日志、被测模块源码、以及同目录已有测试的风格，请生成一个【新的回归测试文件】（node:test 形式），用于把"正确预期行为"锁死。
@@ -816,17 +896,71 @@ function parseMarkdownRequirement(md) {
   // 兜底：无任何结构化「测试点」时，先按 ## 小节标题生成点（模块未知）；
   // 若连 ## 小节都没有（如 TAPD 自由文本需求），则用一个兜底点（标题本身），
   // 保证任意输入都能产出至少 1 个测试点，不会因解析失败中断场景 B。
+  // weakFallback 标记「这批点是规则解析的降级产物、质量弱」，供上层在 LLM 可用时
+  // 触发一次 AI 自主拆解做增强（而非依赖用户预先按约定格式写需求）。
+  let weakFallback = false;
   if (points.length === 0) {
     for (const l of lines) {
       const h = l.match(/^##\s+(.+)$/);
       if (h) points.push({ id: `P${++seq}`, desc: h[1].trim(), module: '', tests: [] });
     }
+    if (points.length) weakFallback = true;
   }
   if (points.length === 0) {
     points.push({ id: 'P1', desc: title || id, module: '', tests: [] });
+    weakFallback = true;
   }
   if (!points.length) throw new Error('Markdown 需求未解析出任何测试点');
-  return { id, title: title || id, source: 'Markdown', affectedModules, points };
+  return { id, title: title || id, source: 'Markdown', affectedModules, points, weakFallback };
+}
+
+// ---------- 场景 B · AI 自主拆解需求测试点（应对无预设格式的自由文本需求）----------
+// 背景：parseMarkdownRequirement 对「## 模块：」「### 测试点」这类约定格式解析质量高，
+// 但真实 TAPD 需求/缺陷大多是无结构自由文本 —— 此时规则解析会降级为「仅标题占位」，
+// 测试点质量弱、模块归属缺失。这里让 LLM 直接读需求原文 + 仓库已有源码模块候选列表，
+// 自主拆出「应当被验证的测试点」并尽量归属到真实存在的模块（不允许编造不存在的路径），
+// 更贴近赛题「不给测试清单，AI 自己读懂需求拆场景」的要求。
+// 防幻觉：module 只能来自 candidateModules（真实扫描得到），否则清空；找不到候选也不阻断流程。
+function listCandidateModules(repoDir) {
+  try {
+    const out = [];
+    for (const g of ['src/**/*.js', 'src/**/*.mjs', 'public/**/*.js']) {
+      out.push(...globSync(path.join(repoDir, g), { exclude: ['**/node_modules/**'] }));
+    }
+    return [...new Set(out)].map((f) => path.relative(repoDir, f).replace(/\\/g, '/')).filter(isSourceFile);
+  } catch {
+    return [];
+  }
+}
+
+async function llmExtractRequirementPoints(reqText, repoDir) {
+  if (!isLLMEnabled()) return null;
+  const candidates = listCandidateModules(repoDir);
+  const system = `你是「AI 测试官」的需求拆解 Agent。给定一份【原始需求/缺陷文本】（可能是自由格式，没有任何预设结构），
+请自主读懂它，拆解出「应当被验证的测试点」列表。
+规则：
+- 每个测试点尽量归属到下方【候选源码模块】中的一个真实路径；若确实无法判断，module 留空字符串，禁止编造不存在的路径。
+- 测试点要具体、可验证（如"满减券未达门槛应拒绝"而非泛泛的"测试优惠券"）。
+- 只输出一个 JSON 数组，不要任何额外文字：[{"id":"P1","desc":"测试点描述","module":"src/xxx.js 或空字符串"}]`;
+  const user = `原始需求/缺陷文本：\n${String(reqText).slice(0, 4000)}\n\n候选源码模块（仅可从中选择，勿编造）：\n${candidates.join('\n') || '（无候选，均留空）'}`;
+  try {
+    const { content, reasoning } = await chat({ messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0.2, maxTokens: 2000, model: fastModel() });
+    if (reasoning) console.log('   🧠 需求拆解：' + reasoning.replace(/\s+/g, ' ').slice(0, 160));
+    const arr = extractJSON(content) || extractJSON(reasoning);
+    if (!Array.isArray(arr) || !arr.length) return null;
+    const candidateSet = new Set(candidates);
+    return arr
+      .map((p, i) => ({
+        id: String(p.id || `P${i + 1}`),
+        desc: String(p.desc || '').trim(),
+        module: candidateSet.has(p.module) ? p.module : '',
+        tests: [],
+      }))
+      .filter((p) => p.desc);
+  } catch (e) {
+    console.warn('⚠️ AI 需求拆解失败，沿用规则解析结果：', e.message);
+    return null;
+  }
 }
 
 // 场景 B：通用「实现核对」探针 —— 仅基于模块结构判断需求点是否真的有代码落地，
@@ -914,7 +1048,8 @@ function buildProcess({ scenario, req, impact, sel, summary, adaptive, generated
   const phases = [];
   if (scenario === 'B') {
     phases.push({ title: '① 读需求/缺陷', detail: `${req.id} · ${req.title}`, status: 'done' });
-    phases.push({ title: '② 拆解测试点', detail: `${req.points.length} 个测试点 / 命中 ${impact.srcFiles.length} 个模块`, status: 'done' });
+    const splitDetail = `${req.points.length} 个测试点 / 命中 ${impact.srcFiles.length} 个模块` + (impact.requirementAiExtracted ? '（AI 自主拆解：需求无预设格式，由 LLM 直读原文拆场景）' : '');
+    phases.push({ title: '② 拆解测试点', detail: splitDetail, status: 'done' });
     if (impact.aiCoverage) phases.push({ title: '③ AI 覆盖度语义判定', detail: '引擎实测证据 + LLM 语义评审（含测试充分性）', status: 'done' });
   } else {
     const u = impact.llmUnderstand;
@@ -956,7 +1091,9 @@ function buildProcess({ scenario, req, impact, sel, summary, adaptive, generated
   }
   if (generatedTests && generatedTests.length) {
     const ok = generatedTests.filter((g) => g.status === 'reproduced').length;
-    phases.push({ title: '⑦ AI 生成回归测试', detail: `${generatedTests.length} 个候选 / ${ok} 个在缺陷分支可复现 bug`, status: 'done' });
+    const reused = generatedTests.filter((g) => g.status === 'existing').length;
+    const detail = `${generatedTests.length} 个候选 / ${ok} 个新生成并在缺陷分支可复现 bug` + (reused ? ` / ${reused} 个复用已有回归守卫（去重）` : '');
+    phases.push({ title: '⑦ AI 生成回归测试', detail, status: 'done' });
   }
   phases.push({ title: '⑥ 生成可决策报告', detail: 'report/index.html', status: 'done' });
   return phases;
@@ -1049,13 +1186,14 @@ function buildPRComment({ report, reportUrl }) {
       lines.push(`- \`${r.name}\`：${String(r.rootCause || r.message || '').slice(0, 160)}`);
     }
   }
-  const repro = (report.generatedTests || []).filter((g) => g.status === 'reproduced');
+  const repro = (report.generatedTests || []).filter((g) => g.status === 'reproduced' || g.status === 'existing');
   if (repro.length) {
     lines.push('');
-    lines.push(`**AI 生成回归测试**：${repro.length} 个已在缺陷分支复现 bug，已作为回归守卫写入（点击文件名跳转仓库查看）：`);
+    lines.push(`**AI 生成回归测试**：${repro.length} 个已在缺陷分支复现 bug 的回归守卫（点击文件名跳转仓库查看）：`);
     for (const g of repro) {
       const rel = String(g.path || g.fileName || '').replace(/\\/g, '/');
-      lines.push(`- [\`${g.name}\`](${rel}) → 回归守卫 \`${rel}\``);
+      const tag = g.status === 'existing' ? '（复用已有）' : '（新生成）';
+      lines.push(`- [\`${g.name}\`](${rel}) → 回归守卫 \`${rel}\` ${tag}`);
     }
   }
   if (reportUrl) {
@@ -1253,12 +1391,29 @@ async function main() {
     }
     const req = readRequirement(reqPath);
     if (tapdSource) req.source = tapdSource;
+
+    // 自由文本需求（无预设「## 模块：/### 测试点」格式）时，规则解析会降级为弱兜底（仅标题占位）。
+    // 此时若 LLM 可用，让 AI 直接读需求原文自主拆解测试点并归属真实模块，
+    // 更贴近赛题「不给测试清单，AI 自己读懂需求拆场景」的要求；解析失败或 LLM 不可用则保留规则兜底结果，不阻断流程。
+    let requirementAiExtracted = false;
+    if (req.weakFallback && isLLMEnabled()) {
+      const reqTextForAI = readTextRobust(reqPath);
+      const aiPoints = await llmExtractRequirementPoints(reqTextForAI, repoDir);
+      if (aiPoints && aiPoints.length) {
+        req.points = aiPoints;
+        req.affectedModules = [...new Set(aiPoints.map((p) => p.module).filter(Boolean))];
+        requirementAiExtracted = true;
+        console.log(`   🤖 需求无预设格式，AI 自主拆解出 ${aiPoints.length} 个测试点（替代弱兜底占位）`);
+      }
+    }
+
     const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
     const rel = path.relative(gitRoot, repoDir);
     const changedFiles = req.affectedModules.map((m) => path.join(rel, m));
     const impact = {
       changedFiles,
       changedFunctions: [],
+      requirementAiExtracted,
       scope: `需求驱动（场景 B）：${req.title}`,
       requirement: { id: req.id, title: req.title, source: req.source },
       srcFiles: changedFiles.filter(isSourceFile),
@@ -1302,7 +1457,11 @@ async function main() {
     let generatedTests = [];
     if (isLLMEnabled()) {
       generatedTests = await generateRegressionTests({ target, failing: failingB, ctx: officerCtxB });
-      if (generatedTests.length) console.log(`🧪 AI 生成回归测试：${generatedTests.filter((g) => g.status === 'reproduced').length} 个在缺陷分支可复现 bug`);
+      if (generatedTests.length) {
+        const ok = generatedTests.filter((g) => g.status === 'reproduced').length;
+        const reused = generatedTests.filter((g) => g.status === 'existing').length;
+        console.log(`🧪 AI 生成回归测试：${ok} 个新生成可复现 bug${reused ? ` / ${reused} 个复用已有守卫（去重）` : ''}`);
+      }
     }
 
     const coverage = computeCoverage(req, results, repoDir);
@@ -1485,7 +1644,11 @@ async function main() {
   let generatedTests = [];
   if (isLLMEnabled()) {
     generatedTests = await generateRegressionTests({ target, failing, ctx: officerCtx });
-    if (generatedTests.length) console.log(`🧪 AI 生成回归测试：${generatedTests.filter((g) => g.status === 'reproduced').length} 个在缺陷分支可复现 bug`);
+    if (generatedTests.length) {
+      const ok = generatedTests.filter((g) => g.status === 'reproduced').length;
+      const reused = generatedTests.filter((g) => g.status === 'existing').length;
+      console.log(`🧪 AI 生成回归测试：${ok} 个新生成可复现 bug${reused ? ` / ${reused} 个复用已有守卫（去重）` : ''}`);
+    }
   }
 
   const u = impact.llmUnderstand;

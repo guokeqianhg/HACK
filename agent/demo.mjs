@@ -74,9 +74,12 @@ async function main() {
     scenarioCard('场景 C · 异常告警', '定时全量回归（发现 bug）', 'report-C-alert', ca),
   ].join('');
 
+  // 注意：computeCoverage 实际产出的状态值是 pass/fail/untested/stub/missing（无 'gap'），
+  // 缺口 = missing（无实现）+ stub（疑似桩）+ untested（有实现无测试）之和
   const cov = b?.coverage || [];
+  const gapCount = cov.filter((c) => ['missing', 'stub', 'untested'].includes(c.status)).length;
   const covLine = cov.length
-    ? `需求覆盖度：${cov.filter((c) => c.status === 'pass').length} 已覆盖 / ${cov.filter((c) => c.status === 'gap').length} 缺口 / ${cov.filter((c) => c.status === 'fail').length} 不达标`
+    ? `需求覆盖度：${cov.filter((c) => c.status === 'pass').length} 已覆盖 / ${gapCount} 缺口 / ${cov.filter((c) => c.status === 'fail').length} 不达标`
     : '';
 
   const html = `<!DOCTYPE html>

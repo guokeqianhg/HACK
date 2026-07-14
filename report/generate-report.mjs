@@ -179,7 +179,13 @@ const html = `<!DOCTYPE html>
     <h2>AI 生成的回归测试（测试生成 Agent）</h2>
     <details open><summary class="fold">展开 / 折叠生成测试</summary>
     <table><thead><tr><th>针对用例</th><th>生成文件</th><th>状态</th><th>锁定的正确行为</th></tr></thead>
-    <tbody>${generatedTests.map((g) => `<tr><td>${esc(g.name)}</td><td><code>${esc(g.fileName || '-')}</code></td><td><b style="color:${g.status === 'reproduced' ? '#2b8a3e' : '#c0392b'}">${g.status === 'reproduced' ? '✅ 缺陷分支可复现' : '⚠️ 未生成'}</b></td><td>${esc(g.asserts || '-')}</td></tr>`).join('')}</tbody></table>
+    <tbody>${generatedTests.map((g) => {
+      const badge = g.status === 'reproduced' ? '✅ 新生成 · 缺陷分支可复现'
+        : g.status === 'existing' ? '♻️ 复用已有回归守卫（去重）'
+        : '⚠️ 未生成';
+      const color = g.status === 'reproduced' ? '#2b8a3e' : g.status === 'existing' ? '#2b5fff' : '#c0392b';
+      return `<tr><td>${esc(g.name)}</td><td><code>${esc(g.fileName || '-')}</code></td><td><b style="color:${color}">${badge}</b></td><td>${esc(g.asserts || '-')}</td></tr>`;
+    }).join('')}</tbody></table>
     </details>
     <p style="font-size:12px;color:#555">生成测试在【缺陷分支】失败 = 能抓住该 bug，已写入仓库 tests/ 作为回归守卫（修复后应通过，可纳入 CI 复跑）。</p>
   </div>` : ''}

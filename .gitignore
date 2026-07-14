@@ -1,21 +1,32 @@
-# 生成的报告与临时产物
+# 生成的报告与临时产物（均由 agent/demo.mjs、run-test-officer.mjs、cron-monitor.mjs 运行时生成，
+# 不纳入版本库；评审现场执行 `node agent/demo.mjs` 即可重新产出，保证报告与代码始终一致不会过期）
 report/index.html
+report/index-demo.html
 report/report.json
 report/report-*.json
 report/report-*.html
-report/index-demo.html
 report/.monitor-state.json
 report/.monitor-last-message.md
-report/_*.log
+report/.officer-last-message.md
+report/.mcp-diff.txt
+report/.mcp-req*.json
+report/.mcp-req*.md
+report/pr-comment.md
+report/*.log
+report/*.txt
 agent/.aio.out.txt
 agent/.debug-test.txt
 agent/.debug-smoke.txt
 agent/.debug-out.txt
+# 任何以 . 开头的一次性调试/探针脚本，均为开发期临时产物，不纳入版本库
+agent/.*.mjs
+agent/.*.js
 
 # 示例应用临时输出
 sample-app/.testout.txt
 sample-app/.bugtest.txt
 sample-app/.bugsmoke.txt
+sample-app/test-results/
 
 # 依赖
 node_modules/
