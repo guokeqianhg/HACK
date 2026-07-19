@@ -5,6 +5,8 @@ report/index-demo.html
 report/report.json
 report/report-*.json
 report/report-*.html
+report/audit-*.json
+report/audit-*.html
 report/.monitor-state.json
 report/.monitor-last-message.md
 report/.officer-last-message.md

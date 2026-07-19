@@ -1,6 +1,6 @@
 // AI 测试官 · 实时执行看板服务器
-// 用法：node report/live-server.mjs [--port 5177]
-// 打开 http://localhost:<port>/ 后，运行 run-test-officer.mjs / demo.mjs 即可在页面上实时看到
+// 用法：node report/live-server.mjs [--port 5177] [--host 127.0.0.1]
+// 打开 http://127.0.0.1:<port>/ 后，运行 run-test-officer.mjs / demo.mjs 即可在页面上实时看到
 // Think → Act → Observe 的执行过程（阶段时间线 + 逐条日志），无需刷新页面。
 //
 // 实现：纯 node:http + Server-Sent Events（SSE），零第三方依赖。
@@ -25,6 +25,7 @@ const args = process.argv.slice(2).reduce((m, a, i, arr) => {
   return m;
 }, {});
 const PORT = Number(args.port || process.env.LIVE_PORT || 5177);
+const HOST = args.host || process.env.LIVE_HOST || '127.0.0.1';
 
 // 列出当前所有实时事件文件（.live-<run>.ndjson），供页面下拉选择正在跑的是哪个场景
 function listRuns() {
@@ -268,7 +269,7 @@ const server = http.createServer((req, res) => {
   res.end('Not Found');
 });
 
-server.listen(PORT, () => {
-  console.log(`🛰️  AI 测试官实时看板已启动：http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.log(`🛰️  AI 测试官实时看板已启动：http://${HOST}:${PORT}`);
   console.log(`   保持此进程运行，另开终端执行 node agent/run-test-officer.mjs ... 或 node agent/demo.mjs 即可实时观察。`);
 });

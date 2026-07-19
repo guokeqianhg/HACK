@@ -23,7 +23,7 @@ f:/HACK
 | A 代码改动 | 指令/读 diff | 影响面分析 → 跑相关单测+API冒烟 → 报告 | 针对性测试报告 |
 | B 需求文档 | 传需求 | 拆解测试点 → 源码结构核对实现 + 测试覆盖度 → 缺口/不达标标注 | 需求覆盖度报告 |
 | C 持续巡检 | 定时/automation | 走核心路径冒烟 → 异常收集根因 → 推送 | 定时巡检+异常推送 |
-| D Bug修复验证 | 传缺陷ID+修复分支 | 读缺陷 → 修复分支跑测 → AI判定是否修好+引入回归 | 修复就绪度报告 |
+| D Bug修复验证 | 传缺陷ID+修复分支 | 读缺陷 → 缺陷基线复现 → 修复分支跑测 → 以 fail→pass 证据判定是否修好+引入回归 | 修复就绪度报告 |
 | E 合并冲突检测 | 传两个待合并分支 | 各自全量 → 模拟合并跑测 → 对比：各自通过但合并后失败的 = 语义冲突 → AI解释根因 | 语义冲突报告 |
 
 场景 D/E 为参赛者从真实工作痛点出发自主扩展：**D** 解决"修了 bug 真的修好了吗？"的验证盲区；**E** 解决 git merge 无法检测的语义冲突（改不同行但逻辑互相覆盖），只有真实跑测才能发现。
@@ -55,21 +55,32 @@ f:/HACK
 ## 实时执行看板（Think → Act → Observe 流式可视化）
 `report/*.html` 是跑完之后生成的静态可决策报告；若想在**执行过程中**实时看到「理解 → 规划 → 执行 → 报告」每一步（包括 ReAct Agent 真实的 Think→Act→Observe 循环轨迹），另开一个终端起实时看板：
 ```bash
-node report/live-server.mjs           # 启动看板服务器（默认 http://localhost:5177，可用 --port 指定端口）
+node report/live-server.mjs           # 启动看板服务器（默认 http://127.0.0.1:5177，可用 --port/--host 指定）
 ```
-保持该进程运行，再在另一个终端正常执行 `node agent/run-test-officer.mjs ...` 或 `node agent/demo.mjs`，打开 `http://localhost:5177` 即可看到：
+保持该进程运行，再在另一个终端正常执行 `node agent/run-test-officer.mjs ...` 或 `node agent/demo.mjs`，打开 `http://127.0.0.1:5177` 即可看到：
 - 按阶段（理解变更 / 选测策略 / ReAct 规划 / 执行验证 / AI 根因推理 / 自适应策略 / AI 生成回归测试 / 生成报告）逐步点亮的时间线；
 - ReAct 规划 Agent 真实调用 `get_diff` / `list_test_files` / `get_module_source` 等工具的完整 Think→Act→Observe 轨迹，逐条流式出现，而非等跑完才看到最终结论；
 - 跑完后自动汇总通过/失败统计，并提供「查看完整报告」跳转到对应的 `report-*.html`。
 
 实现零依赖（纯 `node:http` + Server-Sent Events，无需 WebSocket/第三方包）：执行引擎把每一步写成一行 NDJSON（`report/.live-<out>.ndjson`），看板服务器 tail 该文件并通过 SSE 推给浏览器；看板未启动也完全不影响主流程（写事件失败静默忽略），页面刷新/晚启动都能通过回放历史事件补看到从头的完整过程。
 
+## 功能展示控制台（浏览器一键演示，评审推荐）
+实时看板是「被动观看」——还需另开终端跑命令。若想**只开一个页面完成整场演示**，用展示控制台：
+```bash
+node report/demo-console.mjs            # 默认 http://127.0.0.1:5180，可用 --port/--host 指定
+```
+打开页面即可：
+- 查看五场景（A/B/C健康/C告警/D/E）卡片与各自最近一次跑测结论（通过/发现问题、进度条、报告时间）；
+- 点击场景卡片「▶ 运行」**在浏览器里真实触发执行引擎**（命令白名单与 `agent/demo.mjs` 一致，页面不能注入任意命令；全局单跑互斥，避免 worktree/端口冲突），或点「▶ 一键运行全部场景」依次跑完五场景；
+- 下方实时面板同步呈现 Think→Act→Observe 流式时间线（复用 `.live-<out>.ndjson` 事件流，刷新可回放）；
+- 跑完点「📊 查看报告」跳转对应 `report-*.html`；页面同时展示核心能力亮点与 AI 语义层启用状态（仅检测 Key 是否存在，不读取密钥内容）。
+
 ## 快速开始（核心零依赖、离线可跑）
 ```bash
 cd sample-app
 npm test                 # 运行后端单测（node --test）
 node smoke/api-smoke.mjs # 离线 API 冒烟（场景 C 兜底）
-npm start                # 启动 SUT（http://localhost:3000）可用 Playwright 验证 UI
+npm start                # 启动 SUT（http://127.0.0.1:3000）可用 Playwright 验证 UI
 ```
 **前端体验链路（可选，P0）**：在 `sample-app` 安装 Playwright 后，「AI 测试官」闭环会自动在 worktree 起 SUT 服务并用真实浏览器跑 `ui-smoke.spec.js`，把前端验证并入报告。
 ```bash
@@ -103,7 +114,7 @@ cd sample-app
 git diff main feature/coupon-bug   # 查看改动（单文件：折扣券 9 折算成 1 折）
 ```
 真实可跑：AI 测试官读取 diff → 影响分析 → 运行 `node --test`、API 冒烟 `node smoke/api-smoke.mjs`，并在安装 Playwright 后自动追加真实浏览器 UI 冒烟（结账/折扣券路径）→ 生成含严重级别/根因/复现的报告。
-（全量回归口径：在 `main` 上为 16 通过 / 0 失败；在 `feature/coupon-bug` 上全量为 21 通过 / 8 失败，暴露资损 bug（8 失败均来自同一折扣券 bug：折扣券 9 折算成 1 折，及其引发的叠加/下单/API/UI 链路失败）。场景 A 走「精准选测」+「自适应扩展选测」只跑受影响测试及其隐性关联测试，故 `node agent/demo.mjs` 产物为 12 通过 / 8 失败——失败项与全量回归同源。以上数字可随时通过 `node agent/demo.mjs` 重新产出验证，不依赖手工维护。）
+（口径：`feature/coupon-bug` 相对 `main` 为**单文件改动**——`src/coupon.js` 折扣券漏写 `(1 - )`，把「9 折」算成「1 折」的资损级 bug。在 `main` 上全量回归全部通过（0 失败）；在 `feature/coupon-bug` 上，该 bug 会引发一组同源失败（折扣券本身 + 叠加/下单/API/UI 链路，以及 AI 生成的回归守卫命中）。场景 A 走「精准选测 + 自适应扩展选测」只跑受影响测试及其隐性关联测试，当前实测约为 **19 符合预期 / 10 个问题**（含 UI 冒烟与 2 个 AI 生成回归守卫命中）。以上数字会随 `tests/generated-*.test.js` 回归守卫的增减而变化，属正常现象，可随时通过 `node agent/run-test-officer.mjs --scenario A` 或 `node agent/demo.mjs` 现场重新产出验证，不依赖手工维护。）
 
 ## 演示「持续巡检 + 异常推送」(场景 C)
 场景 C 不依赖代码改动，而是**定时对目标分支做全量回归**，发现失败用例时通过企微机器人 webhook 推送告警，并用状态文件去重避免刷屏。
@@ -132,8 +143,8 @@ node agent/cron-monitor.mjs --branch feature/coupon-bug
 
 > 注：当前 automation 桥接不可用时，可用系统调度器兜底——Windows `schtasks /create /tn "AICron" /tr "node f:/HACK/agent/cron-monitor.mjs --once --branch main" /sc hourly`；或 Linux/Mac 的 `crontab -e` 加 `0 * * * * cd /f/HACK && node agent/cron-monitor.mjs --once --branch main`。
 
-## 离线一键 Demo（串起场景 A / B / C）
-一条命令跑通三场景并生成聚合总览页，评审现场零依赖、可重复：
+## 离线一键 Demo（串起场景 A / B / C / D / E）
+一条命令跑通五场景并生成聚合总览页，评审现场零依赖、可重复：
 ```bash
 node agent/demo.mjs
 # 产物：
@@ -142,16 +153,22 @@ node agent/demo.mjs
 #   report/report-B.html          场景 B：需求文档 → 覆盖度报告
 #   report/report-C-healthy.html  场景 C：定时巡检（健康基线）
 #   report/report-C-alert.html     场景 C：定时巡检（异常告警）
+#   report/report-D.html           场景 D：Bug 修复闭环验证（缺陷基线 fail → 修复分支 pass）
+#   report/report-E.html           场景 E：合并冲突检测（Git 文本冲突 / 语义冲突分层报告）
 ```
 也可单独运行任一场景：
 ```bash
 # 场景 A：diff 驱动精准选测
 node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario A
 # 场景 B：需求驱动覆盖度（离线 fixture 模拟 TAPD 需求）
-node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-bug --scenario B --requirement sample-app/docs/requirement.md
+node agent/run-test-officer.mjs --repo sample-app --base main --target main --scenario B --requirement sample-app/docs/requirement.md
 # 需求可为 Markdown（docs/requirement.md，通用约定格式）或 JSON（requirement-demo.json）；TAPD MCP 取回后写出同结构亦可
 # 场景 C：定时巡检（同 P4，见上）
 node agent/cron-monitor.mjs --branch main
+# 场景 D：Bug 修复验证（默认 --base 为缺陷基线；也可显式 --buggy/--before）
+node agent/run-test-officer.mjs --repo sample-app --base feature/coupon-bug --target main --scenario D --requirement sample-app/docs/requirement.md
+# 场景 E：合并冲突检测（文本冲突与语义冲突分层报告）
+node agent/run-test-officer.mjs --repo sample-app --base main --target feature/coupon-refund-guard --merge feature/coupon-floor-guard --scenario E
 ```
 
 ## 可视化报告

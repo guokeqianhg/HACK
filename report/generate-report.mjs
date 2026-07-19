@@ -36,6 +36,7 @@ const processSteps = data.process || [];
 const coverage = data.coverage || [];
 const generatedTests = data.generatedTests || [];
 const aiSuggestedPoints = data.aiSuggestedPoints || [];
+const branchFailures = data.branchFailures || [];
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 const sevColor = { high: '#ff6b81', medium: '#ffb86b', low: '#3ddc97' };
@@ -124,6 +125,14 @@ const renderGenTests = generatedTests.map((g) => {
   return `<tr><td>${esc(g.name)}</td><td><code>${esc(g.fileName || '-')}</code></td><td><span class="badge badge-${b.cls}">${b.text}</span></td><td>${esc(g.asserts || '-')}</td></tr>`;
 }).join('');
 
+const renderBranchFailures = branchFailures.map((f) => `
+  <tr class="row-err">
+    <td><code>${esc(f.branch || '-')}</code></td>
+    <td>${esc(f.name || '-')}</td>
+    <td><code>${esc(f.testFile || '-')}</code></td>
+    <td class="rootcause">${esc(f.rootCause || '-')}</td>
+  </tr>`).join('');
+
 // 顶部快速导航：仅收录本次报告实际存在的板块，避免死链接
 const navItems = [
   { id: 'sec-timeline', label: '过程时间线' },
@@ -132,6 +141,7 @@ const navItems = [
   generatedTests.length ? { id: 'sec-gentest', label: 'AI 生成测试' } : null,
   aiSuggestedPoints.length ? { id: 'sec-suggested', label: 'AI 补充建议' } : null,
   reactPlan ? { id: 'sec-react', label: 'ReAct 规划' } : null,
+  branchFailures.length ? { id: 'sec-branch-failures', label: '分支失败' } : null,
   { id: 'sec-plan', label: '测试策略' },
   { id: 'sec-results', label: '执行结果' },
   { id: 'sec-blocking', label: '决策项' },
@@ -339,6 +349,16 @@ const html = `<!DOCTYPE html>
     ${(reactPlan.blindSpots || []).length ? `<div style="margin-top:8px"><b>识别的隐性盲区：</b><ul>${reactPlan.blindSpots.map((b) => `<li>${esc(b)}</li>`).join('')}</ul></div>` : ''}
     ${renderReactTrace ? `<details class="reacttrace"><summary>思考 → 行动轨迹（ReAct 循环）</summary><ul>${renderReactTrace}</ul></details>` : ''}
     <p class="hint">此节由真正的 ReAct Agent（Think→Act→Observe 循环 + Function Calling）产出：Agent 自主调用 get_diff / list_test_files 观察事实后，规划"测什么/顺序/是否含 UI/有无盲区"，其建议与结构选测取并集后执行。</p>
+  </div>` : ''}
+
+  ${branchFailures.length ? `
+  <div class="card" id="sec-branch-failures">
+    <h2><span class="icon">⚠️</span>分支独立跑测失败（场景 E）</h2>
+    <details open><summary class="fold">展开 / 折叠分支失败明细</summary>
+    <div class="tablewrap"><table><thead><tr><th>分支</th><th>用例</th><th>测试文件</th><th>根因</th></tr></thead>
+    <tbody>${renderBranchFailures}</tbody></table></div>
+    </details>
+    <p class="hint">这些失败来自合并前的分支独立跑测，不属于 merge 后新增语义冲突，但会阻塞合并安全判定。</p>
   </div>` : ''}
 
   <div class="card" id="sec-plan">

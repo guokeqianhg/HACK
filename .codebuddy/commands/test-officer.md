@@ -6,7 +6,7 @@ description: AI 测试官 - 全链路自动化测试（理解变更→规划→�
 
 ## 已配置的 MCP（mcp.json，由宿主注入本会话）
 - `gongfeng`（TGit/工蜂）：场景 A 取真实 PR/MR diff（如 `mcp__gongfeng__get_merge_request_diff`）。
-- `tapd`（TAPD）：场景 B 取真实需求/缺陷（如 `mcp__tapd__get_story` / `mcp__tapd__get_bug`）。
+- `tapd`（TAPD）：场景 B 取真实需求/缺陷（如 `mcp__tapd__get_story` / `mcp__tapd__get_bug`）；场景 D 也可取真实缺陷用于修复闭环验证。
 - `playwright`（Playwright MCP）：可选，前端体验验证（环境已装时优先用它驱动真实浏览器）。
 - `knot-bot`（企微/Knot webhook）：场景 C 异常推送（也可由 cron-monitor 经 `WEBHOOK_URL` 真实推送）。
 
@@ -15,6 +15,8 @@ description: AI 测试官 - 全链路自动化测试（理解变更→规划→�
 - 「测一下刚提的 PR」（场景 A：代码改动→针对性测试）
 - 「按 TAPD 需求 100123 验证实现」（场景 B：需求→验证）
 - 「定时巡检核心路径」（场景 C：持续巡检）
+- 「验证 TAPD 缺陷 100456 是否修好」（场景 D：Bug 修复验证）
+- 「检测这两个分支合并有没有冲突」（场景 E：合并冲突检测）
 
 ## 执行流程
 
@@ -37,6 +39,20 @@ description: AI 测试官 - 全链路自动化测试（理解变更→规划→�
 ### 场景 C（持续巡检）
 1. 直接用 `node agent/cron-monitor.mjs --branch main [--webhook <url>]`（`WEBHOOK_URL` 已设则真实推送 knot-bot）。
 2. 或配置 CodeBuddy automation 定时调用（见 README）。
+
+### 场景 D（Bug 修复验证）
+1. **真实调用 tapd MCP** 取缺陷内容（如 `mcp__tapd__get_bug`），整理为缺陷/需求输入写入 `report/.mcp-bug.md`。
+2. 运行：
+   `node agent/run-test-officer.mjs --repo sample-app --scenario D --base <缺陷基线> --target <修复分支> --requirement report/.mcp-bug.md`
+   引擎会先在缺陷基线复现失败，再验证修复分支是否 fail→pass，并检查是否引入新回归。
+3. 汇报是否修好、fail→pass 证据、新增回归风险。
+
+### 场景 E（合并冲突检测）
+1. 取得两个待合并分支/commit（来自用户、TGit MR 或本地分支）。
+2. 运行：
+   `node agent/run-test-officer.mjs --repo sample-app --scenario E --base <base> --target <branch-a> --merge <branch-b>`
+   引擎会分别跑两个分支，再模拟合并跑测，区分 Git 文本冲突、分支独立失败与合并后语义冲突。
+3. 汇报是否可合并、冲突类型与建议处理路径。
 
 ## 约束
 - 结论必须来自真实执行输出，严禁编造。

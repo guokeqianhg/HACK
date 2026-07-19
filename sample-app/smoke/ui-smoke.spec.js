@@ -9,9 +9,10 @@
 // 含折扣的用例在 feature/coupon-bug 分支（9折算成1折）会失败，从而在 UI 层抓出资损 bug。
 import { test, expect } from '@playwright/test';
 
-const BASE = process.env.SUT_URL || 'http://localhost:3000';
+const BASE = process.env.SUT_URL || 'http://127.0.0.1:3000';
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, request }) => {
+  await request.post(`${BASE}/api/test/reset`).catch(() => {});
   await page.goto(BASE);
 });
 

@@ -60,15 +60,15 @@ async function main() {
   await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'feature/coupon-bug', '--scenario', 'A', '--out', 'report-A', '--triggeredBy', 'Demo · 场景A 代码改动']);
 
   console.log('\n▶ 场景 B：需求文档（Markdown requirement.md）→ 覆盖度报告');
-  await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'feature/coupon-bug', '--scenario', 'B', '--requirement', 'sample-app/docs/requirement.md', '--out', 'report-B', '--triggeredBy', 'Demo · 场景B 需求驱动']);
+  await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'main', '--scenario', 'B', '--requirement', 'sample-app/docs/requirement.md', '--out', 'report-B', '--triggeredBy', 'Demo · 场景B 需求驱动']);
 
   console.log('\n▶ 场景 C：定时巡检（健康基线 @main）');
   await runNode(['agent/cron-monitor.mjs', '--branch', 'main', '--out', 'report-C-healthy', '--triggeredBy', 'Demo · 场景C 巡检']);
   console.log('\n▶ 场景 C：定时巡检（异常告警 @feature/coupon-bug）');
   await runNode(['agent/cron-monitor.mjs', '--branch', 'feature/coupon-bug', '--out', 'report-C-alert', '--triggeredBy', 'Demo · 场景C 巡检']);
 
-  console.log('\n▶ 场景 D：Bug 修复闭环验证（feature/coupon-bug 修复验证）');
-  await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'feature/coupon-bug', '--scenario', 'D', '--requirement', 'sample-app/docs/requirement.md', '--out', 'report-D', '--triggeredBy', 'Demo · 场景D 修复验证']);
+  console.log('\n▶ 场景 D：Bug 修复闭环验证（feature/coupon-bug → main）');
+  await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'feature/coupon-bug', '--target', 'main', '--scenario', 'D', '--requirement', 'sample-app/docs/requirement.md', '--out', 'report-D', '--triggeredBy', 'Demo · 场景D 修复验证']);
 
   console.log('\n▶ 场景 E：合并冲突检测（refund-guard + floor-guard）');
   await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'feature/coupon-refund-guard', '--merge', 'feature/coupon-floor-guard', '--scenario', 'E', '--out', 'report-E', '--triggeredBy', 'Demo · 场景E 合并冲突检测']);
@@ -86,7 +86,7 @@ async function main() {
     scenarioCard('场景 B · 需求驱动', '读需求 → 拆解测试点 → 覆盖度', 'report-B', b),
     scenarioCard('场景 C · 巡检基线', '定时全量回归（健康）', 'report-C-healthy', ch),
     scenarioCard('场景 C · 异常告警', '定时全量回归（发现 bug）', 'report-C-alert', ca),
-    scenarioCard('场景 D · Bug修复验证', '读缺陷 → 修复分支跑测 → 判定是否修好', 'report-D', d),
+    scenarioCard('场景 D · Bug修复验证', '缺陷基线 fail → 修复分支 pass → 判定是否修好', 'report-D', d),
     scenarioCard('场景 E · 合并冲突检测', '两个分支各自通过 → 合并后语义冲突', 'report-E', e),
   ].join('');
 
@@ -135,7 +135,7 @@ async function main() {
 <header>
   <h1>🤖 AI 测试官 · 离线五场景 Demo 总览</h1>
   <p>零依赖本地闭环：理解变更 → 规划选测 → 真实跑测 → 可决策报告。点击下方任一卡片查看详细报告。</p>
-  <div class="livebadge"><span class="lb-dot"></span>实时看板：另开终端执行 <code>node report/live-server.mjs</code> 后打开 <code>http://localhost:5177</code>，可实时观看 Think→Act→Observe 执行过程</div>
+  <div class="livebadge"><span class="lb-dot"></span>实时看板：另开终端执行 <code>node report/live-server.mjs</code> 后打开 <code>http://127.0.0.1:5177</code>，可实时观看 Think→Act→Observe 执行过程</div>
 </header>
 <main>
   <div class="grid">${cards}</div>
@@ -144,7 +144,7 @@ async function main() {
     • 场景 A（代码改动）：<code>run-test-officer --scenario A</code> —— diff 驱动，导入图反向可达精准选测<br>
     • 场景 B（需求驱动）：<code>run-test-officer --scenario B --requirement …</code> —— 需求点映射实现，产出覆盖度<br>
     • 场景 C（持续巡检）：<code>cron-monitor</code> —— 定时全量回归，异常经企微 webhook 推送（dry-run 落盘）<br>
-    • 场景 D（Bug修复验证）：<code>run-test-officer --scenario D --bug …</code> —— 读缺陷 → 修复分支跑测 → 判定是否修好+引入回归<br>
+    • 场景 D（Bug修复验证）：<code>run-test-officer --scenario D --bug …</code> —— 缺陷基线 fail → 修复分支 pass → 判定是否修好+引入回归<br>
     • 场景 E（合并冲突检测）：<code>run-test-officer --scenario E --merge …</code> —— 两个分支各自通过 → 模拟合并跑测 → 检测语义冲突<br><br>
     ${covLine ? `📋 ${covLine}<br>` : ''}
     🔗 所有报告均为真实执行结果（本地 git worktree + node --test + API 冒烟），未做任何 mock。

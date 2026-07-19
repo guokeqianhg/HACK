@@ -8,6 +8,8 @@
    - 场景 A（代码改动）：读取目标仓库的 diff（`git diff` 或 TGit/工蜂 MCP 取 PR/MR diff），定位被修改的文件、函数、以及谁调用它们，判断"改这里可能让哪条链路挂"。
    - 场景 B（需求文档）：读取需求文档（本地文件或 TAPD MCP），拆解为可验证的测试点，再读代码核对"功能点是否真的被实现"。
    - 场景 C（持续巡检）：按计划/定时任务，走核心路径冒烟，发现异常时收集根因。
+   - 场景 D（Bug 修复验证）：读取缺陷/修复分支，先在缺陷基线复现失败，再在修复分支验证 fail→pass，并判断是否引入回归。
+   - 场景 E（合并冲突检测）：分别验证待合并分支，再模拟合并跑测，区分文本冲突、分支独立失败与合并后语义冲突。
 2. **规划（Plan）**
    - 基于影响面，决定"测什么、用什么手段（单测 / 接口 / UI）"，并给出**可解释的理由**（为什么测这些）。
    - 引擎已内建 LLM 语义层（`agent/llm.mjs`）：把 diff + 结构分析送入模型，得到改动意图 / 风险等级 / 受影响流程 / 建议验证重点；失败根因也由模型结合 diff + 日志做语义归纳。无 `LLM_API_KEY` 时回退本地规则，保证离线可演示（见 README「AI 语义能力」）。
@@ -21,7 +23,7 @@
 ## 输出报告 JSON Schema（写回 report/report.json）
 ```json
 {
-  "meta": { "title": "AI 测试官报告", "repo": "sample-app", "scenario": "A|B|C", "triggeredBy": "指令/定时", "generatedAt": "ISO时间" },
+  "meta": { "title": "AI 测试官报告", "repo": "sample-app", "scenario": "A|B|C|D|E", "triggeredBy": "指令/定时", "generatedAt": "ISO时间" },
   "impact": { "changedFiles": [], "changedFunctions": [], "risk": "一句话风险", "affectedScenarios": [] },
   "plan": [ { "step": "读 diff", "why": "定位改动" } ],
   "results": [ { "name": "用例名", "type": "unit|api|ui", "status": "pass|fail|skip", "severity": "high|medium|low", "rootCause": "…", "repro": "复现命令" } ],

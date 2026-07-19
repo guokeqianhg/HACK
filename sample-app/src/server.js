@@ -18,8 +18,13 @@ const PRODUCTS = [
   { sku: 'SKU03', name: '4K显示器', priceCents: 159900, stock: 5 },
 ];
 
+function seedInventory() {
+  resetInventory();
+  for (const p of PRODUCTS) setStock(p.sku, p.stock);
+}
+
 // 初始化库存
-for (const p of PRODUCTS) setStock(p.sku, p.stock);
+seedInventory();
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -33,6 +38,15 @@ function sendJson(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
+function isLocalRequest(req) {
+  const addr = req.socket?.remoteAddress || '';
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+function canResetForTest(req) {
+  return process.env.ENABLE_TEST_RESET === '1' || process.env.NODE_ENV === 'test' || isLocalRequest(req);
+}
+
 export function createServer() {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
@@ -43,6 +57,11 @@ export function createServer() {
     }
     if (req.method === 'GET' && url.pathname === '/api/inventory') {
       return sendJson(res, 200, Object.fromEntries(PRODUCTS.map((p) => [p.sku, getStock(p.sku)])));
+    }
+    if (req.method === 'POST' && url.pathname === '/api/test/reset') {
+      if (!canResetForTest(req)) return sendJson(res, 403, { ok: false, message: 'test reset disabled' });
+      seedInventory();
+      return sendJson(res, 200, { ok: true });
     }
     if (req.method === 'POST' && url.pathname === '/api/checkout') {
       let body = '';
@@ -85,5 +104,6 @@ export function createServer() {
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
   const port = process.env.PORT || 3000;
-  createServer().listen(port, () => console.log(`SUT running on http://localhost:${port}`));
+  const host = process.env.HOST || '127.0.0.1';
+  createServer().listen(port, host, () => console.log(`SUT running on http://${host}:${port}`));
 }

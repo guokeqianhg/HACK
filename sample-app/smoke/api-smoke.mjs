@@ -4,9 +4,9 @@ import { createServer } from '../src/server.js';
 import { resetInventory, setStock } from '../src/inventory.js';
 
 const server = createServer();
-await new Promise((r) => server.listen(0, r));
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const port = server.address().port;
-const base = `http://localhost:${port}`;
+const base = `http://127.0.0.1:${port}`;
 
 let failures = 0;
 function check(name, cond) {
