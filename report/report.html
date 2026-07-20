@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>AI 测试官报告</title>
+<style>
+  :root{
+    --bg:#0b0e17;--panel:#12172a;--panel2:#161c33;--line:#232a45;--txt:#e7eaf6;--sub:#8993b8;
+    --accent:#6d8dff;--accent2:#9b7dff;--ok:#3ddc97;--warn:#ffb86b;--err:#ff6b81;
+  }
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;background:radial-gradient(1200px 620px at 15% -10%,#1a2148 0%,var(--bg) 55%);color:var(--txt);min-height:100vh;line-height:1.5}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  header{padding:26px 32px 22px;border-bottom:1px solid var(--line);background:rgba(18,23,42,.55);backdrop-filter:blur(6px);position:sticky;top:0;z-index:10}
+  header .htop{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  header h1{margin:0;font-size:21px;font-weight:800;letter-spacing:.2px;background:linear-gradient(135deg,#c9d4ff,#e8d9ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .metachips{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .chip{font-size:12px;padding:4px 11px;border-radius:20px;background:var(--panel2);border:1px solid var(--line);color:var(--sub)}
+  .chip b{color:var(--txt);font-weight:600}
+  nav.quicknav{display:flex;gap:16px;flex-wrap:wrap;margin-top:14px;font-size:12.5px}
+  nav.quicknav a{color:var(--sub);padding:2px 0;border-bottom:2px solid transparent}
+  nav.quicknav a:hover{color:var(--accent);border-color:var(--accent);text-decoration:none}
+  main{max-width:1120px;margin:0 auto;padding:28px 32px 70px;display:grid;gap:20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;box-shadow:0 1px 0 rgba(255,255,255,.02) inset}
+  .card h2{margin:0 0 16px;font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:8px;color:#f1f3ff}
+  .card h2 .icon{font-size:16px}
+  .card > p.hint{font-size:12px;color:var(--sub);margin:10px 0 0}
+
+  /* 顶部统计 */
+  .statsrow{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;text-align:center}
+  .stat b{display:block;font-size:28px;font-weight:800;margin-bottom:2px}
+  .stat.total b{color:var(--txt)}.stat.pass b{color:var(--ok)}.stat.fail b{color:var(--err)}
+  .stat span.label{font-size:12px;color:var(--sub)}
+  .ringstat{display:flex;align-items:center;justify-content:center;gap:14px}
+  .ring{width:66px;height:66px;border-radius:50%;background:conic-gradient(#3ddc97 calc(var(--pct) * 1%), var(--line) 0);display:flex;align-items:center;justify-content:center;position:relative;flex-shrink:0}
+  .ring::before{content:'';position:absolute;inset:6px;border-radius:50%;background:var(--panel)}
+  .ring b{position:relative;z-index:1;font-size:15px}
+  .ringstat .rlabel{text-align:left;font-size:12px;color:var(--sub)}
+  .ringstat .rlabel b{display:block;color:var(--txt);font-size:14px}
+
+  /* 过程时间线（与实时看板视觉一致，静态呈现最终结果） */
+  .timeline{display:flex;flex-direction:column}
+  .step{display:grid;grid-template-columns:26px 1fr;gap:14px;position:relative;padding-bottom:18px}
+  .step:last-child{padding-bottom:0}
+  .step::before{content:'';position:absolute;left:12px;top:26px;bottom:0;width:2px;background:var(--line)}
+  .step:last-child::before{display:none}
+  .node{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;z-index:1;border:2px solid var(--ok);background:rgba(61,220,151,.12);color:var(--ok)}
+  .step.warn .node{border-color:var(--warn);background:rgba(255,184,107,.12);color:var(--warn)}
+  .step .title{font-weight:700;font-size:13.5px;color:#f1f3ff}
+  .step .detail{font-size:12.5px;color:var(--sub);margin-top:4px;word-break:break-word}
+
+  /* details 折叠 */
+  details > summary.fold{cursor:pointer;color:var(--accent);font-size:13px;font-weight:600;margin-bottom:12px;user-select:none;list-style:none}
+  details > summary.fold::-webkit-details-marker{display:none}
+  details[open] > summary.fold::before{content:"▾ "}
+  details:not([open]) > summary.fold::before{content:"▸ "}
+
+  /* 表格 */
+  .tablewrap{overflow-x:auto;border-radius:10px;border:1px solid var(--line)}
+  table{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
+  th,td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+  th{background:var(--panel2);color:var(--sub);font-weight:600;font-size:11.5px;letter-spacing:.3px;text-transform:uppercase;position:sticky;top:0}
+  tbody tr{transition:background .12s}
+  tbody tr:hover{background:rgba(109,141,255,.06)}
+  tbody tr:last-child td{border-bottom:none}
+  .row-err{border-left:3px solid var(--err)}
+  .row-warn{border-left:3px solid var(--warn)}
+  .row-ok{border-left:3px solid var(--ok)}
+  .rootcause{max-width:360px;color:#c3cbef;font-size:12.5px}
+  code{background:#0d1120;padding:2px 7px;border-radius:5px;font-size:12px;color:#b9c3ff;border:1px solid var(--line)}
+
+  /* 徽章 */
+  .badge{display:inline-flex;align-items:center;font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap}
+  .badge-ok{background:rgba(61,220,151,.15);color:var(--ok)}
+  .badge-err{background:rgba(255,107,129,.15);color:var(--err)}
+  .badge-warn{background:rgba(255,184,107,.15);color:var(--warn)}
+  .badge-accent{background:rgba(109,141,255,.15);color:var(--accent)}
+  .badge-muted{background:var(--panel2);color:var(--sub)}
+  .sev{font-weight:700;font-size:12.5px}
+  .muted-text{color:var(--sub)}
+
+  /* 标签 chip */
+  .tag{display:inline-block;background:var(--panel2);color:var(--accent);border:1px solid var(--line);border-radius:6px;padding:3px 9px;margin:2px;font-size:12px}
+  .tag-type{color:var(--accent2)}
+
+  ul{margin:0;padding-left:0;list-style:none}
+  ul li{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
+  ul li:last-child{border-bottom:none}
+  ul li b{color:#f1f3ff;display:block;margin-bottom:2px}
+  ul li .why{color:var(--sub);font-size:12.5px}
+
+  /* ReAct 轨迹 */
+  .reacttrace{margin-top:8px}
+  .reacttrace summary{cursor:pointer;font-weight:600;font-size:13px;color:var(--accent)}
+  .reacttrace ul{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+  .reacttrace li{border-bottom:none;padding:8px 10px;background:#0d1120;border-radius:8px;font-size:12.5px;color:var(--sub)}
+  .reacttrace li.trace-think{border-left:3px solid var(--accent2);color:#c9baff}
+  .reacttrace li.trace-act{border-left:3px solid var(--accent);color:#b7c6ff}
+  .reacttrace li.trace-answer{border-left:3px solid var(--ok);color:#a9f2d2}
+  .ticon{margin-right:4px}
+  .targs{color:#6b7399}
+
+  .aireason{font-size:11.5px;color:var(--sub);margin-top:4px}
+  .aigap{font-size:11.5px;color:var(--err);margin-top:2px}
+
+  .blockinglist li{color:var(--warn)}
+  footer{max-width:1120px;margin:0 auto;padding:0 32px 40px;color:var(--sub);font-size:12px;text-align:center}
+
+  /* 结论横幅：一句话消除"通过/失败"数字歧义 */
+  .verdict{border-radius:14px;padding:18px 22px;display:flex;gap:16px;align-items:flex-start;border:1px solid var(--line)}
+  .verdict.bad{background:linear-gradient(135deg,rgba(255,107,129,.1),rgba(255,184,107,.06));border-color:rgba(255,107,129,.35)}
+  .verdict.good{background:linear-gradient(135deg,rgba(61,220,151,.1),rgba(109,141,255,.06));border-color:rgba(61,220,151,.35)}
+  .verdict .vicon{font-size:26px;line-height:1;flex-shrink:0;margin-top:1px}
+  .verdict .vtitle{font-size:16.5px;font-weight:800;color:#f1f3ff;margin-bottom:6px}
+  .verdict .vsub{font-size:13px;color:#c3cbef;line-height:1.8}
+  .verdict .vsub b{color:var(--txt)}
+  .stat .sublabel{font-size:10.5px;color:var(--sub);opacity:.8;margin-top:2px;display:block}
+
+  @media (max-width:720px){ .statsrow{grid-template-columns:repeat(2,1fr)} }
+</style></head>
+<body>
+<header>
+  <div class="htop"><h1>🤖 AI 测试官报告</h1></div>
+  <div class="metachips">
+    <span class="chip">仓库 <b>sample-app</b></span>
+    <span class="chip">场景 <b>A</b></span>
+    <span class="chip">触发 <b>分支 HEAD 对比 main</b></span>
+    <span class="chip">生成 <b>2026-07-16T12:22:23.228Z</b></span>
+    <span class="chip">AI 语义层 <b>已启用</b></span>
+  </div>
+  <nav class="quicknav"><a href="#sec-timeline">过程时间线</a><a href="#sec-impact">影响面</a><a href="#sec-react">ReAct 规划</a><a href="#sec-plan">测试策略</a><a href="#sec-results">执行结果</a><a href="#sec-blocking">决策项</a></nav>
+</header>
+<main>
+  <div class="verdict good">
+    <div class="vicon">✅</div>
+    <div>
+      <div class="vtitle">✅ AI 测试官验证通过，未发现异常</div>
+      <div class="vsub">本次共执行 22 项验证（单测 / API 冒烟 / UI 冒烟），全部符合预期，AI 测试官未发现异常，可视为安全通过。</div>
+    </div>
+  </div>
+
+  <div class="statsrow">
+    <div class="stat total"><b>22</b><span class="label">总验证项</span><span class="sublabel">单测 + API 冒烟 + UI 冒烟</span></div>
+    <div class="stat pass"><b>22</b><span class="label">符合预期</span><span class="sublabel">运行结果与断言一致</span></div>
+    <div class="stat fail"><b>0</b><span class="label">发现问题</span><span class="sublabel">AI 测试官捕获的异常信号</span></div>
+    <div class="stat"><div class="ringstat">
+      <div class="ring" style="--pct:100"><b>100%</b></div>
+      <div class="rlabel">符合预期占比<b>22 / 22</b></div>
+    </div></div>
+  </div>
+
+  <div class="card" id="sec-timeline">
+    <h2><span class="icon">🧭</span>AI 测试官过程时间线</h2>
+    <div class="timeline">
+  <div class="step done">
+    <div class="node">✓</div>
+    <div class="body">
+      <div class="title">① 理解变更（AI 语义分析）</div>
+      <div class="detail">无代码改动，维持原状（风险 low）</div>
+    </div>
+  </div>
+  <div class="step done">
+    <div class="node">✓</div>
+    <div class="body">
+      <div class="title">② 影响面分析</div>
+      <div class="detail">（无改动）</div>
+    </div>
+  </div>
+  <div class="step done">
+    <div class="node">✓</div>
+    <div class="body">
+      <div class="title">②→ ReAct 整体规划</div>
+      <div class="detail">核心风险：无代码改动场景下的基线回归验证：确保优惠券叠加计算、库存扣减回滚、端到端下单核心链路在现有状态下全部正确 ｜  ｜ 盲区 5 处</div>
+    </div>
+  </div>
+  <div class="step done">
+    <div class="node">✓</div>
+    <div class="body">
+      <div class="title">③ 选测策略</div>
+      <div class="detail">⚠️ 全量回退 6 个</div>
+    </div>
+  </div>
+  <div class="step done">
+    <div class="node">✓</div>
+    <div class="body">
+      <div class="title">④ 执行验证</div>
+      <div class="detail">通过 22 / 失败 0</div>
+    </div>
+  </div>
+  <div class="step done">
+    <div class="node">✓</div>
+    <div class="body">
+      <div class="title">⑥ 生成可决策报告</div>
+      <div class="detail">report/index.html</div>
+    </div>
+  </div></div>
+  </div>
+
+  <div class="card" id="sec-impact">
+    <h2><span class="icon">🔍</span>影响面分析</h2>
+    <div><b>改动文件：</b><span class="muted-text">-</span></div>
+    <p style="margin:12px 0 0"><b>改动范围：</b>无改动（全量回归）</p>
+    
+    <p style="margin:8px 0 0"><b>选测策略：</b>⚠️ 全量回退 — 无改动（全量回归）</p>
+    <p style="margin:8px 0 0"><b>关联测试文件：</b><span class="tag">tests\checkout-client.test.js</span><span class="tag">tests\coupon.test.js</span><span class="tag">tests\generated-discount-coupon-90-percent.test.js</span><span class="tag">tests\generated-stack-coupon-correct.test.js</span><span class="tag">tests\inventory.test.js</span><span class="tag">tests\order.test.js</span></p>
+  </div>
+
+  
+
+  
+
+  
+
+  
+  <div class="card" id="sec-react">
+    <h2><span class="icon">🧭</span>ReAct Agent 整体规划（自主策略）</h2>
+    <p><b>核心风险：</b>无代码改动场景下的基线回归验证：确保优惠券叠加计算、库存扣减回滚、端到端下单核心链路在现有状态下全部正确</p>
+    <p style="margin-top:8px"><b>规划理由：</b>diff 为空，因此本计划是基线回归而非改动验证。mustRunTests 包含全部 6 个 unit 测试：其中 coupon.test.js 是优惠券引擎最全面的覆盖（含满减、无门槛、折扣、叠加、兜底为负），两个 generated 文件虽是子集但既然已存在且列在候选里，一并包含可提供冗余上报；checkout-client.test.js 覆盖前端金额格式化核心；inventory.test.js 覆盖库存基础操作；order.test.js 覆盖最高层的编排集成。includeUi=true 因为 UI smoke 覆盖了真实浏览器环境下的 9 折金额正确性（能直接抓出资损 bug），includeApi=true 因为 API smoke 驱动真实 HTTP 服务端路径，可校验库存扣减和下单回滚在服务端生效。blindSpots 列出了 5 个当前测试未触及的隐性风险区域，作为后续补测建议。</p>
+    <p style="margin-top:8px"><b>是否含 UI 冒烟：</b>是 ｜ <b>是否含 API 冒烟：</b>是</p>
+    
+    <div style="margin-top:8px"><b>识别的隐性盲区：</b><ul><li>checkout-client.js 的 summarizeCart() 导出但无任何单测覆盖，改动该函数无法被现有测试捕获</li><li>空购物车下单无校验（UI smoke 已暴露此产品缺口），背后缺失 getCartItems().length === 0 的守卫逻辑</li><li>库存无并发扣减测试（源码注释已自述），reserve 在高并发下存在超卖风险但无测试覆盖</li><li>buildLineTotal 缺少负数量、零价格等边界输入的单测</li><li>src/server.js 模块本身无独立单元测试，仅靠 API 冒烟间接覆盖</li></ul></div>
+    <details class="reacttrace"><summary>思考 → 行动轨迹（ReAct 循环）</summary><ul><li class="trace-think"><span class="ticon">🧠</span> 用户给了我一个结构选测的候选列表，但让我先用工具观察真实 diff 与全部可运行测试。我先获取 diff 和所有测试文件列表。</li><li class="trace-act"><span class="ticon">🛠</span> <code>get_diff</code></li><li class="trace-act"><span class="ticon">🛠</span> <code>list_test_files</code></li><li class="trace-think"><span class="ticon">🧠</span> Let me analyze what we have:
+
+1. **Diff**: 无 diff（没有代码改动）。这意味着当前分支与基准分支相比没有变化。
+2. **可运行测试文件**：
+   - Unit tests: `tests\checkout-client.test.js`, `tests\coupon.test.js`, `tests\generated-discount-coupon-90-percent.test.js`, `tests\generated-stack-coupon-correct.test.js`, `tests\inventory.test.js`, `tests\order.test.js`
+   - UI smoke: `smoke\ui-smoke.spec.js`
+   - API smoke: `smoke\api-smoke.mjs`
+
+由</li><li class="trace-act"><span class="ticon">🛠</span> <code>read_test_file</code> <span class="targs">{"relPath":"tests\\checkout-client.test.js"}</span></li><li class="trace-act"><span class="ticon">🛠</span> <code>read_test_file</code> <span class="targs">{"relPath":"tests\\coupon.test.js"}</span></li><li class="trace-act"><span class="ticon">🛠</span> <code>read_test_file</code> <span class="targs">{"relPath":"tests\\generated-discount-coupon-90-percent.test.js"}</span></li><li class="trace-act"><span class="ticon">🛠</span> <code>read_test_file</code> <span class="targs">{"relPath":"tests\\generated-stack-coupon-correct.test.js"}</span></li><li class="trace-act"><span class="ticon">🛠</span> <code>read_test_file</code> <span class="targs">{"relPath":"tests\\inventory.test.js"}</span></li><li class="trace-act"><span class="ticon">🛠</span> <code>read_test_file</code> <span class="targs">{"relPath":"tests\\order.test.js"}</span></li><li class="trace-think"><span class="ticon">🧠</span> Now let me also look at the source modules to understand the full picture:
+
+1. **diff**: Empty — no code changes have been made.
+2. **Test files available**:
+   - `tests\checkout-client.test.js` — formatMoney and buildLineTotal from `src/checkout-client.js`
+   - `tests\coupon.test.js` — calcSubtotal and applyCouponStack from `src/coupon.js`
+   - `tests\generated-discount-coupon-90-percent.test.js`</li><li class="trace-act"><span class="ticon">🛠</span> <code>get_module_source</code> <span class="targs">{"relPath":"src/checkout-client.js"}</span></li><li class="trace-act"><span class="ticon">🛠</span> <code>get_module_source</code> <span class="targs">{"relPath":"src/coupon.js"}</span></li><li class="trace-act"><span class="ticon">🛠</span> <code>get_module_source</code> <span class="targs">{"relPath":"src/inventory.js"}</span></li><li class="trace-act"><span class="ticon">🛠</span> <code>get_module_source</code> <span class="targs">{"relPath":"src/order.js"}</span></li><li class="trace-think"><span class="ticon">🧠</span> Now let me also check the UI smoke and API smoke files to understand what they cover.
+
+Let me also look at the smoke tests.</li><li class="trace-act"><span class="ticon">🛠</span> <code>read_test_file</code> <span class="targs">{"relPath":"smoke\\ui-smoke.spec.js"}</span></li><li class="trace-act"><span class="ticon">🛠</span> <code>read_test_file</code> <span class="targs">{"relPath":"smoke\\api-smoke.mjs"}</span></li><li class="trace-think"><span class="ticon">🧠</span> Now I have a comprehensive understanding of the codebase:
+
+1. **Diff is empty** - No code changes detected. This is a baseline/regression test planning scenario.
+
+2. **Available test files:**
+   - `tests\checkout-client.test.js` - Tests for `formatMoney` and `buildLineTotal` from checkout-client.js
+   - `tests\coupon.test.js` - Comprehensive coupon logic tests (calcSubtotal, applyCouponStack with </li><li class="trace-answer"><span class="ticon">✅</span> 现在我对全貌已完全掌握。来看分析结论：
+
+### 观察结果
+
+| 维度 | 详情 |
+|------|------|
+| **Diff** | **空** — 无任何代码改动 |
+| **仓库类型** | 电商 checkout 系统：`checkout-client.js`（前端）、`coupon.js`（优惠券引擎）、`inventory.js`（库存）、`order.js`（下单编排） |
+| **现存单测** | 6 个 unit 文件 + 1 个 UI 冒烟 + 1 个 API 冒烟 |
+| **生成测试** | `generated-discount-coupon-90-percent.test.js` 与 `generated-stack-coupon-correct.test.js` 是 `coupon.test.js` 的子集，内容完全重复 |
+| **未被覆盖的导出**</li></ul></details>
+    <p class="hint">此节由真正的 ReAct Agent（Think→Act→Observe 循环 + Function Calling）产出：Agent 自主调用 get_diff / list_test_files 观察事实后，规划"测什么/顺序/是否含 UI/有无盲区"，其建议与结构选测取并集后执行。</p>
+  </div>
+
+  <div class="card" id="sec-plan">
+    <h2><span class="icon">📝</span>测试策略（规划）</h2>
+    <ul><li><b>读 git diff main..HEAD</b><span class="why">AI 语义理解：无代码改动，维持原状（由于没有代码变更，风险极低，但仍需进行全量回归以验证系统稳定性。）</span></li><li><b>ReAct Agent 规划测试策略（核心风险：无代码改动场景下的基线回归验证：确保优惠券叠加计算、库存扣减回滚、端到端下单核心链路在现有状态下全部正确）</b><span class="why">diff 为空，因此本计划是基线回归而非改动验证。mustRunTests 包含全部 6 个 unit 测试：其中 coupon.test.js 是优惠券引擎最全面的覆盖（含满减、无门槛、折扣、叠加、兜底为负），两个 generated 文件虽是子集但既然已存在且列在候选里，一并包含可提供冗余上报；checkout-client.test.js 覆盖前端金额格式化核心；inventory.test.js 覆盖库存基础操作；order.test.js 覆盖最高层的编排集成。includeUi=true 因为 UI smoke 覆盖了真实浏览器环境下的 9 折金额正确性（能直接抓出资损 bug），includeApi=true 因为 API smoke 驱动真实 HTTP 服务端路径，可校验库存扣减和下单回滚在服务端生效。blindSpots 列出了 5 个当前测试未触及的隐性风险区域，作为后续补测建议。；识别盲区 5 处</span></li><li><b>跑全量单测 node --test</b><span class="why">无改动（全量回归）</span></li><li><b>跑 API 端到端冒烟</b><span class="why">真实 API 端到端验证核心下单链路</span></li></ul>
+  </div>
+
+  <div class="card" id="sec-results">
+    <h2><span class="icon">📊</span>执行结果</h2>
+    <details open><summary class="fold">展开 / 折叠执行结果</summary>
+    <div class="tablewrap"><table><thead><tr><th>用例</th><th>类型</th><th>状态</th><th>严重级</th><th>根因</th><th>复现</th></tr></thead>
+    <tbody>
+  <tr class="row-ok">
+    <td>formatMoney 分转元</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>buildLineTotal 行小计</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>小计 = 单价 × 数量</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>满减券：满足门槛才生效</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>满减券：不满门槛被拒绝</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>折扣券：9 折应付 90%</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>叠加：满减 + 无门槛 + 折扣</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>价格不为负</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>无门槛立减券：直接立减固定金额</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>折扣券：9折应付90%</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>叠加：满减 + 无门槛 + 折扣（正确顺序与计算）</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>扣减成功返回剩余库存</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>库存不足被拒绝</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>释放可回补库存</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>正常下单：返回订单号与优惠后金额</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>库存不足下单失败并回滚库存</td>
+    <td><span class="tag tag-type">unit</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node --test</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>商品列表返回 3 个商品</td>
+    <td><span class="tag tag-type">api</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node smoke/api-smoke.mjs</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>下单成功</td>
+    <td><span class="tag tag-type">api</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node smoke/api-smoke.mjs</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>9 折后应付 26910 分(¥269.10)</td>
+    <td><span class="tag tag-type">api</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node smoke/api-smoke.mjs</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>库存已扣减至 9</td>
+    <td><span class="tag tag-type">api</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node smoke/api-smoke.mjs</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>库存不足被拒绝(INVENTORY)</td>
+    <td><span class="tag tag-type">api</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>node smoke/api-smoke.mjs</code></td>
+  </tr>
+  <tr class="row-ok">
+    <td>前端 UI 冒烟（Playwright）</td>
+    <td><span class="tag tag-type">ui</span></td>
+    <td><span class="badge badge-ok">✅ PASS</span></td>
+    <td><span class="sev" style="color:#8993b8">-</span></td>
+    <td class="rootcause">-</td>
+    <td><code>playwright test smoke/ui-smoke.spec.js</code></td>
+  </tr></tbody></table></div>
+    </details>
+  </div>
+
+  <div class="card" id="sec-blocking">
+    <h2><span class="icon">🚦</span>阻塞项 / 需人工决策</h2>
+    <ul class="blockinglist"><li style="color:var(--ok)">✅ 无阻塞项，可放行</li></ul>
+  </div>
+</main>
+<footer>由「AI 测试官」自动生成 · 理解变更 → 规划策略 → 执行验证 → 可决策报告</footer>
+</body></html>
