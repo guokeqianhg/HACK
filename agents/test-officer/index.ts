@@ -140,22 +140,104 @@ async function writeEngineToSandbox(sandbox: any) {
   return { written, failed };
 }
 
+// ── SSE 流式响应（平台长任务标准协议）────────────────────────────
+// 长耗时运行（1~3 分钟）绝不能「憋到最后一次性返回」：网关在等不到首字节约 15s 后
+// 会判定 CLOUD_FUNCTION_INVOCATION_TIMEOUT（504）。按平台约定改为：
+// 立即建立 text/event-stream 流 + 每 5s ping 心跳 + 关键节点进度事件 + 最终结果事件。
+function sseEvent(data: Record<string, any>): string {
+  return `data: ${JSON.stringify(data)}\n\n`;
+}
+
+function sseResponse(generator: (signal?: any) => AsyncGenerator<string>, signal?: any) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      const heartbeat = setInterval(() => {
+        try { controller.enqueue(encoder.encode(sseEvent({ type: 'ping', ts: Date.now() }))); } catch { /* 流已关闭 */ }
+      }, 5000);
+      try {
+        for await (const chunk of generator(signal)) {
+          if (signal && signal.aborted) break;
+          controller.enqueue(encoder.encode(chunk));
+        }
+      } catch (e: any) {
+        try { controller.enqueue(encoder.encode(sseEvent({ type: 'error_message', content: String(e && e.message || e) }))); } catch { /* ignore */ }
+      } finally {
+        clearInterval(heartbeat);
+        try { controller.enqueue(encoder.encode('data: [DONE]\n\n')); } catch { /* ignore */ }
+        try { controller.close(); } catch { /* ignore */ }
+      }
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
+}
+
+// SSE 通道编排：带进度回调跑完整流程，进度事件实时转发到流里，结果/错误收尾
+async function* runSse(context: any, signal?: any): AsyncGenerator<string> {
+  const queue: string[] = [];
+  let wake: (() => void) | null = null;
+  const onProgress = (msg: string) => { queue.push(msg); if (wake) { const w = wake; wake = null; w(); } };
+
+  let result: any = null; let err: any = null; let done = false;
+  const task = (async () => {
+    try { result = await onRequestInner(context, onProgress); }
+    catch (e: any) { err = e; }
+    finally { done = true; if (wake) { const w = wake; wake = null; w(); } }
+  })();
+
+  while (!done || queue.length) {
+    if (signal && signal.aborted) break;
+    if (queue.length) { yield sseEvent({ type: 'status', content: queue.shift() }); continue; }
+    await new Promise<void>((r) => { wake = r; setTimeout(r, 300); });
+  }
+  await task;
+
+  if (err) yield sseEvent({ type: 'error_message', content: String(err && err.message || err) });
+  else yield sseEvent({ type: 'result', data: result });
+}
+
+function killSandbox(sb: any) {
+  if (sb && typeof sb.kill === 'function') return sb.kill().catch(() => { /* 实例可能已被平台回收 */ });
+  return Promise.resolve();
+}
+
 export async function onRequest(context: any) {
   // 沙箱按租约存活（extendTimeout 拉到 30 分钟），运行结束后若不主动释放，实例会空烧 GB-秒
   // 直到租约到期——这是月度沙箱配额快速耗尽的主要来源。无论成功/报错/异常，跑完立即 kill。
   // 对本架构安全：每次调用本就重写引擎 + 重新 clone，无跨请求状态依赖；
   // 报告 HTML 已通过 reportHtmlContent 读回，live-server 看板随实例销毁但内容不丢。
   const sb = context && context.sandbox;
+  const headers = (context && context.request && context.request.headers) || {};
+  const accept = String(headers['accept'] || headers['Accept'] || '');
+  const signal = context && context.request && context.request.signal;
+
+  // 前端带 Accept: text/event-stream → SSE 流式通道（心跳保活，规避网关首字节超时 504）
+  if (accept.includes('text/event-stream')) {
+    const gen = async function* () {
+      try { yield* runSse(context, signal); }
+      finally { await killSandbox(sb); }
+    };
+    return sseResponse(gen, signal);
+  }
+
+  // 兼容通道：普通 JSON 一次性返回（curl / 旧前端 / API 集成）
   try {
-    return await onRequestInner(context);
+    return jsonResponse(await onRequestInner(context));
   } finally {
-    if (sb && typeof sb.kill === 'function') {
-      try { await sb.kill(); } catch { /* 实例可能已被平台回收，忽略 */ }
-    }
+    await killSandbox(sb);
   }
 }
 
-async function onRequestInner(context: any) {
+async function onRequestInner(context: any, onProgress?: (msg: string) => void) {
   let scenario = 'A';
   let params: Record<string, any> = {};
   try {
@@ -169,7 +251,7 @@ async function onRequestInner(context: any) {
 
   const sandbox = context && context.sandbox;
   if (!sandbox || !sandbox.commands) {
-    return jsonResponse({ ok: false, error: '当前运行环境没有 Makers 沙箱。请在 EdgeOne Makers 平台部署后调用。' });
+    return { ok: false, error: '当前运行环境没有 Makers 沙箱。请在 EdgeOne Makers 平台部署后调用。' };
   }
 
   // 【诊断】写引擎进沙箱 → 列目录 → 试运行引擎 --help 看真实报错
@@ -183,8 +265,8 @@ async function onRequestInner(context: any) {
     ].join(' ; ');
     try {
       const r = await sandbox.commands.run(probe, { timeout: 60 });
-      return jsonResponse({ ok: true, diag: true, writeInfo, stdout: r.stdout || '', stderr: r.stderr || '', exitCode: r.exitCode });
-    } catch (e: any) { return jsonResponse({ ok: false, diag: true, writeInfo, error: e && e.message ? e.message : String(e) }); }
+      return { ok: true, diag: true, writeInfo, stdout: r.stdout || '', stderr: r.stderr || '', exitCode: r.exitCode };
+    } catch (e: any) { return { ok: false, diag: true, writeInfo, error: e && e.message ? e.message : String(e) }; }
   }
 
   // 延长沙箱会话
@@ -193,11 +275,13 @@ async function onRequestInner(context: any) {
   }
 
   // 1) 把引擎文件写进沙箱
+  if (onProgress) onProgress('沙箱环境已就绪，正在写入引擎文件…');
   try { await writeEngineToSandbox(sandbox); } catch (e: any) {
     const msg = e && e.message ? e.message : String(e);
-    if (isQuotaError(msg)) return jsonResponse({ ok: false, quota: true, error: QUOTA_MSG, raw: msg });
-    return jsonResponse({ ok: false, error: '写入引擎文件到沙箱失败：' + msg });
+    if (isQuotaError(msg)) return { ok: false, quota: true, error: QUOTA_MSG, raw: msg };
+    return { ok: false, error: '写入引擎文件到沙箱失败：' + msg };
   }
+  if (onProgress) onProgress('引擎文件写入完成');
 
   // 2) clone 公开 case 仓库（内置 demo）或用户指定仓库
   const caseRepo = (params.caseRepo && String(params.caseRepo).trim())
@@ -208,6 +292,7 @@ async function onRequestInner(context: any) {
   const userRepoUrl = params.repoUrl && String(params.repoUrl).trim();
 
   if (!userRepoUrl) {
+    if (onProgress) onProgress('正在从 GitHub 克隆被测仓库…（网络波动时会自动重试）');
     let cloneErr = '';
     try {
       // 先确保目录干净（可能上次沙箱复用留了残留文件）
@@ -233,9 +318,10 @@ async function onRequestInner(context: any) {
       if (!/CLONE_DONE/.test(cr.stdout || '')) cloneErr = ((cr.stdout || '') + '\n' + (cr.stderr || '') || 'clone 未完成').slice(-800);
     } catch (e: any) { cloneErr = e && e.message ? e.message : String(e); }
     if (cloneErr) {
-      if (isQuotaError(cloneErr)) return jsonResponse({ ok: false, quota: true, error: QUOTA_MSG, raw: cloneErr });
-      return jsonResponse({ ok: false, error: '在沙箱克隆 case 仓库失败：' + cloneErr, hint: '请确认 DEMO_CASE_REPO 是公开可 clone 的地址。', caseRepo });
+      if (isQuotaError(cloneErr)) return { ok: false, quota: true, error: QUOTA_MSG, raw: cloneErr };
+      return { ok: false, error: '在沙箱克隆 case 仓库失败：' + cloneErr, hint: '请确认 DEMO_CASE_REPO 是公开可 clone 的地址。', caseRepo };
     }
+    if (onProgress) onProgress('仓库克隆完成，正在准备测试环境…');
   }
 
   // 3) 需求文本写进沙箱
@@ -255,6 +341,7 @@ async function onRequestInner(context: any) {
   } catch { /* ignore */ }
 
   // 5) 真实跑引擎
+  if (onProgress) onProgress('引擎执行中：AI 语义理解 → 精准选测 → 真实跑测…');
   let runOut = ''; let runErr = '';
   try {
     const res = await sandbox.commands.run(argv.map((a) => JSON.stringify(a)).join(' '), {
@@ -263,14 +350,15 @@ async function onRequestInner(context: any) {
     runOut = res.stdout || ''; runErr = res.stderr || '';
   } catch (e: any) {
     const msg = e && e.message ? e.message : String(e);
-    if (isQuotaError(msg)) return jsonResponse({ ok: false, quota: true, error: QUOTA_MSG, raw: msg });
+    if (isQuotaError(msg)) return { ok: false, quota: true, error: QUOTA_MSG, raw: msg };
     runErr = (runErr || '') + '\n[wrapper] engine run failed: ' + msg;
   }
 
+  if (onProgress) onProgress('跑测完成，正在汇总报告…');
   const summary = await readSandboxJson(sandbox, `${WORK}/report/${outName}.json`);
   const reportHtmlContent = await readSandboxText(sandbox, `${WORK}/report/${outName}.html`);
 
-  return jsonResponse({
+  return {
     ok: true, scenario, conversationId: context.conversation_id || '', reportName: outName,
     repoMode: userRepoUrl ? 'user-repo' : `demo-${demoCase}`,
     demoCase: userRepoUrl ? '' : demoCase,
@@ -280,7 +368,7 @@ async function onRequestInner(context: any) {
     reportHtmlContent,
     engineStdoutTail: runOut.split('\n').slice(-40).join('\n'),
     engineStderrTail: runErr.split('\n').slice(-40).join('\n'),
-  });
+  };
 }
 
 function jsonResponse(obj: any) {

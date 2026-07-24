@@ -323,6 +323,8 @@
     border: 1px solid rgba(181,67,42,.22); border-left: 3px solid var(--accent);
     color: #8a3a24; font-size: 12.5px; line-height: 1.8;
   }
+  .progLine { margin-top: 6px; display: flex; gap: 6px; align-items: baseline; animation: fadeUp .3s ease both; }
+  .progLine::before { content: "✓"; color: var(--ok); font-weight: 800; }
   .racts { margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap; }
   .btn2 {
     display: inline-flex; align-items: center; gap: 8px;
@@ -822,7 +824,7 @@ async function run() {
   rTitle.textContent = `场景 ${scenario} 运行结果`;
   rStatus.className = 'status run';
   rStatus.innerHTML = '<span class="spinner"></span> 沙箱克隆 + 真实跑测中…';
-  rBody.innerHTML = '<div class="runHint">正在执行：git clone → AI 语义理解 → 精准选测 → 真实跑测 → 生成报告（通常一分钟~三分钟）</div>';
+  rBody.innerHTML = '<div class="runHint" id="runProgress">正在执行：git clone → AI 语义理解 → 精准选测 → 真实跑测 → 生成报告（通常一分钟~三分钟）</div>';
   rActs.style.display = 'none';
   rLog.className = 'logbox'; rLog.textContent = '';
   closeModal(); rModalFrame.removeAttribute('srcdoc');
@@ -831,23 +833,61 @@ async function run() {
   try {
     const resp = await fetch('/test-officer', {
       method: 'POST',
-      headers: { 'content-type': 'application/json', 'makers-conversation-id': convId() },
+      headers: { 'content-type': 'application/json', 'makers-conversation-id': convId(), 'accept': 'text/event-stream' },
       body: JSON.stringify({ scenario, params }),
     });
-    // 先按文本读取再手动解析：网关错误页（401/504/超时）返回的是 HTML 而非 JSON，
-    // 直接 resp.json() 在 Safari 里会抛 "The string did not match the expected pattern"。
-    // 解析失败按 HTTP 状态码分类给出具体原因，不再用大杂烩提示。
+    const ctype = resp.headers.get('content-type') || '';
+    if (resp.ok && ctype.includes('text/event-stream')) {
+      // SSE 流式通道：后端立即开流 + 5s 心跳保活（规避网关首字节超时 504），实时进度 + 最终结果
+      const sse = await readSseStream(resp);
+      if (sse.result) { render(sse.result); return; }
+      const emsg = sse.error || '服务未返回结果，请稍后重试。';
+      showFriendlyError(classifyBackendError(emsg) || emsg);
+      return;
+    }
+    // 兼容/错误通道：普通 JSON（旧后端）或网关错误页（HTML）
     const text = await resp.text();
     let data = null;
     try { data = JSON.parse(text); } catch { /* 非 JSON：网关错误页 */ }
-    if (!data) { showHttpError(resp.status, text); return; }
-    render(data);
+    if (data) { render(data); return; }
+    showHttpError(resp.status, text);
   } catch (err) {
     showHttpError(0, '');
   } finally {
     running = false;
     runBtn.disabled = false;
   }
+}
+
+// 实时进度追加
+function appendProgress(msg) {
+  const el = document.getElementById('runProgress');
+  if (el) { const d = document.createElement('div'); d.className = 'progLine'; d.textContent = msg; el.appendChild(d); }
+}
+
+// 读取 SSE 流：解析 data: 事件，status 实时上屏，result/error 收尾
+async function readSseStream(resp) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = ''; let result = null; let error = null;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const raw = buf.slice(0, idx); buf = buf.slice(idx + 2);
+      const line = raw.split('\n').find(l => l.startsWith('data:'));
+      if (!line) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      let evt; try { evt = JSON.parse(payload); } catch { continue; }
+      if (evt.type === 'status' && evt.content) appendProgress(evt.content);
+      else if (evt.type === 'result') result = evt.data;
+      else if (evt.type === 'error_message') error = evt.content;
+    }
+  }
+  return { result, error };
 }
 
 // 数字滚动动画
