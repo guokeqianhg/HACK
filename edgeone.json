@@ -2,6 +2,11 @@
   "buildCommand": "node -e \"0\"",
   "outputDirectory": "web",
   "agents": {
-    "framework": "claude-agent-sdk"
+    "framework": "claude-agent-sdk",
+    "dir": "agents",
+    "timeout": 600,
+    "sandbox": {
+      "timeout": 600
+    }
   }
 }
