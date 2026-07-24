@@ -47,7 +47,7 @@ try {
 const spec = path.join(sampleApp, 'smoke', 'ui-smoke.spec.js');
 check(fs.existsSync(spec), 'ui-smoke.spec.js 存在', '缺失前端冒烟用例');
 
-console.log('\n=== AI 测试官 · UI 链路就绪检查 ===');
+console.log('\n=== TestScope · UI 链路就绪检查 ===');
 for (const o of ok) console.log(`  ✅ ${o}`);
 for (const i of issues) console.log(`  ❌ ${i.label}\n      修复: ${i.fix}`);
 

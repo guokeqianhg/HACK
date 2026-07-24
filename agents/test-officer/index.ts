@@ -1,4 +1,4 @@
-// AI 测试官 · EdgeOne Makers Agent 入口
+// TestScope · EdgeOne Makers Agent 入口
 // 部署形态：Agents（agents/test-officer/index.ts + edgeone.json）
 //
 // ⚠️ 平台硬规则：agents/ 内禁止读 process.env / process.cwd()

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// AI 测试官 · LLM 接入层（OpenAI 兼容 Chat Completions 协议 + 原生 Function Calling）
+// TestScope · LLM 接入层（OpenAI 兼容 Chat Completions 协议 + 原生 Function Calling）
 //
 // 设计目标：
 //   1. 让引擎「理解变更 / 规划策略 / 根因推理」真正由大模型完成，而非仅正则/导入图。

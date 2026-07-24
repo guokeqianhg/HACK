@@ -1,4 +1,4 @@
-// AI 测试官 · 实时执行看板服务器
+// TestScope · 实时执行看板服务器
 // 用法：node report/live-server.mjs [--port 5177] [--host 127.0.0.1]
 // 打开 http://127.0.0.1:<port>/ 后，运行 run-test-officer.mjs / demo.mjs 即可在页面上实时看到
 // Think → Act → Observe 的执行过程（阶段时间线 + 逐条日志），无需刷新页面。
@@ -48,7 +48,7 @@ function sendSSE(res, event) {
 const PAGE = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>AI 测试官 · 实时执行看板</title>
+<title>TestScope · 实时执行看板</title>
 <style>
   :root{--bg:#0b0e17;--panel:#12172a;--panel2:#161c33;--line:#232a45;--txt:#e7eaf6;--sub:#8993b8;--accent:#6d8dff;--accent2:#9b7dff;--ok:#3ddc97;--warn:#ffb86b;--err:#ff6b81}
   *{box-sizing:border-box}
@@ -98,7 +98,7 @@ const PAGE = `<!DOCTYPE html>
 <body>
 <header>
   <span class="dot" id="dot"></span>
-  <h1>🤖 AI 测试官 · 实时执行看板</h1>
+  <h1>🤖 TestScope · 实时执行看板</h1>
   <select id="runSelect"></select>
   <button id="refreshBtn">刷新运行列表</button>
 </header>
@@ -107,7 +107,7 @@ const PAGE = `<!DOCTYPE html>
     实时订阅 <code>run-test-officer.mjs</code> / <code>cron-monitor.mjs</code> 执行过程中写出的事件流（Think → Act → Observe），无需刷新页面。
     先在终端跑一次 <code>node agent/run-test-officer.mjs --scenario A --out report-A</code>（或 <code>node agent/demo.mjs</code>），再回到本页选择对应运行即可看到实时进度。
   </div>
-  <div id="timeline" class="timeline"><div class="empty"><div class="big">🛰️</div>等待运行开始…<br/>在终端执行 AI 测试官命令后，这里会实时出现执行过程</div></div>
+  <div id="timeline" class="timeline"><div class="empty"><div class="big">🛰️</div>等待运行开始…<br/>在终端执行 TestScope命令后，这里会实时出现执行过程</div></div>
   <div class="footer-stat" id="footerStat" style="display:none"></div>
 </main>
 <script>
@@ -149,7 +149,7 @@ function ensurePhaseEl(ev){
 
 function renderEvent(ev){
   if (ev.type === 'meta') {
-    document.title = 'AI 测试官 · ' + (ev.title || '实时看板');
+    document.title = 'TestScope · ' + (ev.title || '实时看板');
     return;
   }
   if (ev.type === 'phase') {
@@ -278,7 +278,7 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`🛰️  AI 测试官实时看板已启动：http://${HOST}:${PORT}`);
+  console.log(`🛰️  TestScope实时看板已启动：http://${HOST}:${PORT}`);
   console.log(`   数据目录：${REPORT_DIR}${args.dir ? '（--dir 指定）' : '（默认，可用 --dir <path> 指向任意目录）'}`);
   console.log(`   保持此进程运行，另开终端执行 node agent/run-test-officer.mjs ... 或 node agent/demo.mjs 即可实时观察。`);
 });

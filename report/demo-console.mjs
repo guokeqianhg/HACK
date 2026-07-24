@@ -1,4 +1,4 @@
-// AI 测试官 · 功能展示控制台
+// TestScope · 功能展示控制台
 // 用法：node report/demo-console.mjs [--port 5180] [--host 127.0.0.1]，然后打开 http://127.0.0.1:5180
 //
 // 一个页面串起评审演示全流程：场景介绍 → 浏览器一键真实执行 → Think→Act→Observe 实时过程 → 报告跳转。
@@ -151,7 +151,7 @@ function sendSSE(res, event) {
 const PAGE = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>AI 测试官 · 功能展示控制台</title>
+<title>TestScope · 功能展示控制台</title>
 <style>
   :root{--bg:#0b0e17;--panel:#12172a;--panel2:#161c33;--line:#232a45;--txt:#e7eaf6;--sub:#8993b8;--accent:#6d8dff;--accent2:#9b7dff;--ok:#3ddc97;--warn:#ffb86b;--err:#ff6b81}
   *{box-sizing:border-box}
@@ -272,7 +272,7 @@ const PAGE = `<!DOCTYPE html>
 <body>
 <header>
   <div class="hrow">
-    <h1>🤖 AI 测试官 · 功能展示控制台</h1>
+    <h1>🤖 TestScope · 功能展示控制台</h1>
     <div class="hchips">
       <span class="chip">五场景闭环</span>
       <span class="chip">ReAct 规划</span>
@@ -328,7 +328,7 @@ const PAGE = `<!DOCTYPE html>
   </div>
 </main>
 <div class="toast" id="toast"></div>
-<footer>由「AI 测试官」展示控制台提供 · 方向二 · 全链路自动化测试 Agent</footer>
+<footer>由「TestScope」展示控制台提供 · 方向二 · 全链路自动化测试 Agent</footer>
 `;
 
 const CLIENT_JS = `
@@ -661,6 +661,6 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`🎬 AI 测试官 · 功能展示控制台已启动：http://${HOST}:${PORT}`);
+  console.log(`🎬 TestScope · 功能展示控制台已启动：http://${HOST}:${PORT}`);
   console.log('   打开页面即可一键运行五场景，并实时观看 Think→Act→Observe 执行过程。');
 });

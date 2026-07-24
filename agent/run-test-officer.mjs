@@ -1,4 +1,4 @@
-// AI 测试官 · 执行引擎（闭环：理解 diff → 规划 → 真实跑测 → 生成报告）
+// TestScope · 执行引擎（闭环：理解 diff → 规划 → 真实跑测 → 生成报告）
 // 核心零依赖：基于 git + node --test + node smoke/api-smoke.mjs
 // 前端体验链路（可选）：worktree 起 SUT 服务 + Playwright 跑 ui-smoke（需 sample-app 安装 @playwright/test）
 //
@@ -69,7 +69,7 @@ const args = process.argv.slice(2).reduce((m, a, i, arr) => {
 }, {});
 
 if (args.help) {
-  console.log(`AI 测试官 · 执行引擎（理解 diff → 规划 → 真实跑测 → 报告）
+  console.log(`TestScope · 执行引擎（理解 diff → 规划 → 真实跑测 → 报告）
 用法：
   node agent/run-test-officer.mjs (--repo <dir> | --repo-url <git地址>) --base <ref> --target <ref> --scenario <A|B|C|D|E>
                                 [--requirement <json|md>] [--diff <file>] [--story <TAPD需求ID>] [--bug <TAPD缺陷ID>] [--out <name>] [--triggeredBy <text>]
@@ -289,7 +289,7 @@ function normalizeSemanticResult(raw) {
 
 async function semanticAnalyze(diffText, structural) {
   if (!isLLMEnabled()) return null;
-  const system = `你是一名资深测试架构师，服务于「AI 测试官」。请对下面的代码 diff 做语义级理解：真正读懂改动意图、判断哪里可能出问题、可能影响哪些业务流程，并给出建议验证重点。
+  const system = `你是一名资深测试架构师，服务于「TestScope」。请对下面的代码 diff 做语义级理解：真正读懂改动意图、判断哪里可能出问题、可能影响哪些业务流程，并给出建议验证重点。
 请先逐步思考（你会在回复中看到自己的思考轨迹），再【只输出一个 JSON 对象】，不要任何额外文字，也不要 markdown 代码围栏。字段必须完全使用下列英文键名，值用中文描述，数组元素为字符串：
 {
   "intent": "一句话说明改动意图",
@@ -395,7 +395,7 @@ async function llmRootCause(diffText, failures, ctx) {
     const log = ctx.getFailureLog(f.name);
     return `### ${f.name}\n类型=${f.type}\n现有线索=${String(f.rootCause).slice(0, 200)}\n日志/堆栈:\n${log.slice(0, 1200)}`;
   }).join('\n---\n');
-  const system = `你是资深测试调试专家（AI 测试官·根因分析）。给定代码 diff 摘要与若干失败用例的真实日志/堆栈，请对每条失败用例做语义级根因分析（读懂"为什么挂"），只输出一个 JSON 对象：
+  const system = `你是资深测试调试专家（TestScope·根因分析）。给定代码 diff 摘要与若干失败用例的真实日志/堆栈，请对每条失败用例做语义级根因分析（读懂"为什么挂"），只输出一个 JSON 对象：
 { "causes": { "用例名": "语义根因（含可能触发条件，2-3 句）" } }
 无法判断的用例值为 "（无法判定，见原始日志）"。不要输出任何额外文字。`;
   const user = `代码改动摘要：\n${String(diffText).slice(0, 3000)}\n\n失败用例与日志：\n${logs}`;
@@ -849,7 +849,7 @@ async function runInWorktree(targetRef, testFiles, opts = {}) {
     unit: skipUnit ? [] : parseNodeTest(testOut.out, nameFileMap),
     api: skipApi ? [] : parseApiSmoke(smokeOut.out),
     ui: skipUi ? [] : uiOut,
-    // 保留原始输出：供 AI 测试官 Agent 的 get_failure_log 工具抽取失败用例完整日志/堆栈
+    // 保留原始输出：供 TestScope Agent 的 get_failure_log 工具抽取失败用例完整日志/堆栈
     raw: {
       unit: skipUnit ? '' : (testOut?.out || ''),
       api: skipApi ? '' : (smokeOut?.out || ''),
@@ -930,7 +930,7 @@ async function adaptiveDecision(failing) {
     try {
       const { content } = await chat({
         messages: [
-          { role: 'system', content: '你是「AI 测试官」的测试策略指挥官。首轮测试出现失败，请用一句话说明后续自适应动作的理由（扩展选测以发现隐性影响面、深度复跑确认可复现）。只输出一句话，不要 JSON、不要解释。' },
+          { role: 'system', content: '你是「TestScope」的测试策略指挥官。首轮测试出现失败，请用一句话说明后续自适应动作的理由（扩展选测以发现隐性影响面、深度复跑确认可复现）。只输出一句话，不要 JSON、不要解释。' },
           { role: 'user', content: `失败用例（${failing.length} 个）：${failing.map((f) => f.name).join('、')}` },
         ],
         temperature: 0.2,
@@ -1137,7 +1137,7 @@ async function generateRegressionTests({ target, failing, ctx }) {
 
     const moduleSrc = moduleRel ? ctx.getModuleSource(moduleRel) : '';
     const testSrc = ctx.readTestFile(path.join('tests', f.testFile));
-    const system = `你是「AI 测试官」的测试生成 Agent。给定一条失败用例、其真实日志、被测模块源码、以及同目录已有测试的风格，请生成一个【新的回归测试文件】（node:test 形式），用于把"正确预期行为"锁死。
+    const system = `你是「TestScope」的测试生成 Agent。给定一条失败用例、其真实日志、被测模块源码、以及同目录已有测试的风格，请生成一个【新的回归测试文件】（node:test 形式），用于把"正确预期行为"锁死。
 要求：
 - 必须 import 被测模块的真实导出（见下方「被测模块源码」确认导出名与签名），再做断言。
 - 断言【正确预期】而非缺陷行为：该测试在【当前缺陷分支】应当失败（证明它能抓住这个 bug），在修复后应通过。
@@ -1418,7 +1418,7 @@ function listCandidateModules(repoDir) {
 async function llmExtractRequirementPoints(reqText, repoDir) {
   if (!isLLMEnabled()) return null;
   const candidates = listCandidateModules(repoDir);
-  const system = `你是「AI 测试官」的需求拆解 Agent。给定一份【原始需求/缺陷文本】（可能是自由格式，没有任何预设结构），
+  const system = `你是「TestScope」的需求拆解 Agent。给定一份【原始需求/缺陷文本】（可能是自由格式，没有任何预设结构），
 请自主读懂它，拆解出「应当被验证的测试点」列表。
 规则：
 - 每个测试点尽量归属到下方【候选源码模块】中的一个真实路径；若确实无法判断，module 留空字符串，禁止编造不存在的路径。
@@ -1545,7 +1545,7 @@ function computeCoverage(req, results, repoDir) {
   });
 }
 
-// 统一生成「AI 测试官过程时间线」，供 HTML 可视化（不依赖业务语义）
+// 统一生成「TestScope过程时间线」，供 HTML 可视化（不依赖业务语义）
 function buildProcess({ scenario, req, impact, sel, summary, adaptive, generatedTests = [], fixVerdict, semanticConflictsCount = 0, textConflictsCount = 0 }) {
   const phases = [];
   if (scenario === 'D') {
@@ -1633,7 +1633,7 @@ async function planWithReActAgent({ repoDir, diffText, impact, sel, officerCtx, 
   if (!isLLMEnabled() || !hasFastModel()) return null;
 
   const tools = makeOfficerTools({ ...officerCtx, repoDir });
-  const system = `你是「AI 测试官」的首席规划 Agent。你的职责不是执行测试，而是【规划测试策略】。
+  const system = `你是「TestScope」的首席规划 Agent。你的职责不是执行测试，而是【规划测试策略】。
 你会拿到一次代码改动，需要通过工具观察"改了什么、有哪些可运行测试"，然后自主决定：
   1. 本次改动最该优先验证的核心风险点是什么；
   2. 从现有测试文件中，挑选出必须运行的子集（给相对路径）；
@@ -1709,14 +1709,14 @@ function buildPRComment({ report, reportUrl }) {
   const passRate = s.total ? Math.round((s.pass / s.total) * 100) : 0;
   const icon = s.fail > 0 ? '🔴' : '🟢';
   const lines = [];
-  lines.push(`## ${icon} AI 测试官 · 自动化验证报告`);
+  lines.push(`## ${icon} TestScope · 自动化验证报告`);
   lines.push('');
-  // 措辞说明：避免"通过 X / 失败 Y"被误读为"AI 测试官只做对了 X 件事"——
-  // 失败数是 AI 测试官成功捕获的问题信号数，数字越高代表发现的风险越多，而非工具本身运行失败。
+  // 措辞说明：避免"通过 X / 失败 Y"被误读为"TestScope只做对了 X 件事"——
+  // 失败数是 TestScope成功捕获的问题信号数，数字越高代表发现的风险越多，而非工具本身运行失败。
   lines.push(
     s.fail > 0
-      ? `**结论**：AI 测试官在本次共 ${s.total} 项验证中，发现 **${s.fail} 个问题**（符合预期 ${s.pass} 项，占比 ${passRate}%）——须修复并复测通过后方可合入/发布。`
-      : `**结论**：AI 测试官完成本次共 ${s.total} 项验证，全部符合预期（${passRate}%），未发现异常，可放行。`
+      ? `**结论**：TestScope在本次共 ${s.total} 项验证中，发现 **${s.fail} 个问题**（符合预期 ${s.pass} 项，占比 ${passRate}%）——须修复并复测通过后方可合入/发布。`
+      : `**结论**：TestScope完成本次共 ${s.total} 项验证，全部符合预期（${passRate}%），未发现异常，可放行。`
   );
   if (report.impact?.llmUnderstand) {
     const u = report.impact.llmUnderstand;
@@ -1745,7 +1745,7 @@ function buildPRComment({ report, reportUrl }) {
     lines.push(`📊 完整报告：${reportUrl}`);
   }
   lines.push('');
-  lines.push('_由 AI 测试官自动生成_');
+  lines.push('_由 TestScope自动生成_');
   return lines.join('\n');
 }
 
@@ -2132,7 +2132,7 @@ async function main() {
       });
     }
     const report = {
-      meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
+      meta: { title: 'TestScope报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
       impact,
       plan,
       results,
@@ -2150,7 +2150,7 @@ async function main() {
     liveEmit.phase('report', '⑧ 生成可决策报告', `report/${outName}.html`, 'done');
     // 企微真实推送闭环：与其余场景一致，配置 --webhook/WEBHOOK_URL 则真推，否则跳过
     await pushToWeChat({ report, outName });
-    console.log(`\n✅ 场景 B 完成：需求覆盖 ${covered} 项 / 缺口 ${gaps} 项 / AI 测试官发现 ${failingPts} 个不达标问题`);
+    console.log(`\n✅ 场景 B 完成：需求覆盖 ${covered} 项 / 缺口 ${gaps} 项 / TestScope发现 ${failingPts} 个不达标问题`);
     console.log(perf());
     liveEmit.done({ summary: report.summary, reportFile: `${outName}.html` });
     return;
@@ -2270,7 +2270,7 @@ async function main() {
         const { content } = await chat({
           messages: [{
             role: 'system',
-            content: `你是「AI 测试官」的修复验证 Agent。事实结论已由引擎根据真实跑测结果确定，请只给出一句面向研发/测试的补充说明。输出 JSON：{"reason":"一句话补充说明"}`,
+            content: `你是「TestScope」的修复验证 Agent。事实结论已由引擎根据真实跑测结果确定，请只给出一句面向研发/测试的补充说明。输出 JSON：{"reason":"一句话补充说明"}`,
           }, {
             role: 'user',
             content: `缺陷描述：${String(bugText).slice(0, 1200)}\n\n修复 diff（${base}..${target}）：\n${String(diffText).slice(0, 1600)}\n\n引擎证据：\n${evidenceText}\n\n引擎判定：${fixVerdict.verdict} - ${fixVerdict.reason}`,
@@ -2295,7 +2295,7 @@ async function main() {
       { step: `修复就绪度判定`, why: fixVerdict.verdict === 'fixed' ? '✅ 修复通过，无回归' : `⚠️ ${fixVerdict.reason}` },
     ];
     const report = {
-      meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
+      meta: { title: 'TestScope报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
       impact,
       plan,
       results,
@@ -2421,7 +2421,7 @@ async function main() {
         const { content, reasoning } = await chat({
           messages: [{
             role: 'system',
-            content: `你是「AI 测试官」的合并冲突分析 Agent。两个分支合并时 Git 检测到【文本冲突】（同一处代码被双方改动，无法自动合并）。
+            content: `你是「TestScope」的合并冲突分析 Agent。两个分支合并时 Git 检测到【文本冲突】（同一处代码被双方改动，无法自动合并）。
 请基于两个分支各自相对 base 的 diff，分析：每个分支分别改了什么、为什么会在同一处产生冲突、合并为何不安全、以及建议如何解决。
 只输出一个 JSON（不要任何额外文字或代码围栏）：
 {"summary":"一句话总结为什么合并不安全","conflicts":[{"file":"冲突文件","branchAChange":"分支A在此处改了什么","branchBChange":"分支B在此处改了什么","whyConflict":"为什么会文本冲突/合并不安全","resolution":"建议如何解决"}]}`,
@@ -2453,7 +2453,7 @@ async function main() {
         const { content } = await chat({
           messages: [{
             role: 'system',
-            content: `你是「AI 测试官」的语义冲突分析 Agent。给定两个分支各自相对 base 的 diff 和合并后出现的新失败用例，
+            content: `你是「TestScope」的语义冲突分析 Agent。给定两个分支各自相对 base 的 diff 和合并后出现的新失败用例，
 请分析为什么会出现语义冲突（两个分支各自改了什么、合并后哪个逻辑被覆盖/冲突了）。
 输出一个 JSON（不要任何额外文字）：{"summary":"一句话总结冲突原因","conflicts":[{"test":"失败用例名","branchAChange":"分支A改了什么","branchBChange":"分支B改了什么","whyConflict":"合并后为什么冲突"}]}`,
           }, {
@@ -2486,7 +2486,7 @@ async function main() {
         const { content, reasoning } = await chat({
           messages: [{
             role: 'system',
-            content: '你是「AI 测试官」的合并放行研判助手。两个待合并分支各自跑测未全绿（存在失败），虽无"合并后新增"的语义冲突，但分支自身问题未清。请输出中文 JSON：{"summary":"一句话研判为何暂不能合并/需先做什么","risk":"high|medium|low"}。只输出 JSON。',
+            content: '你是「TestScope」的合并放行研判助手。两个待合并分支各自跑测未全绿（存在失败），虽无"合并后新增"的语义冲突，但分支自身问题未清。请输出中文 JSON：{"summary":"一句话研判为何暂不能合并/需先做什么","risk":"high|medium|low"}。只输出 JSON。',
           }, {
             role: 'user',
             content: `分支 ${target} 与 ${mergeBranch} 各自独立跑测共 ${branchFailCount} 个失败：\n${branchFailText}`,
@@ -2531,7 +2531,7 @@ async function main() {
     ];
 
     const report = {
-      meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
+      meta: { title: 'TestScope报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
       impact,
       plan,
       results: resultsMerge,
@@ -2763,7 +2763,7 @@ async function main() {
   }
 
   const report = {
-    meta: { title: 'AI 测试官报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
+    meta: { title: 'TestScope报告', repo: path.basename(repoDir), scenario, triggeredBy, generatedAt: new Date().toISOString(), aiEnabled: isLLMEnabled() },
     impact,
     plan,
     results,
@@ -2789,8 +2789,8 @@ async function main() {
 
   console.log(
     report.summary.fail > 0
-      ? `\n🐞 完成：AI 测试官在 ${report.summary.total} 项验证中发现 ${report.summary.fail} 个问题（符合预期 ${report.summary.pass} 项）`
-      : `\n✅ 完成：AI 测试官验证 ${report.summary.total} 项，全部符合预期`
+      ? `\n🐞 完成：TestScope在 ${report.summary.total} 项验证中发现 ${report.summary.fail} 个问题（符合预期 ${report.summary.pass} 项）`
+      : `\n✅ 完成：TestScope验证 ${report.summary.total} 项，全部符合预期`
   );
   console.log(perf());
   liveEmit.done({ summary: report.summary, reportFile: `${outName}.html` });

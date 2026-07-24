@@ -47,8 +47,8 @@ const passPct = summary.total ? Math.round((summary.pass / summary.total) * 100)
 const ringColor = (summary.fail || 0) > 0 ? '#b03427' : '#4d7c5b';
 
 // ---------- 结论横幅：消除"通过/失败"数字的歧义 ----------
-// 背景：单纯展示「12 通过 / 8 失败」容易被误读为"AI 测试官只做对了 12 件事、搞砸了 8 件"，
-// 但实际语义正相反——失败数是 AI 测试官在被测代码里"成功发现的问题信号"，数字越高代表它
+// 背景：单纯展示「12 通过 / 8 失败」容易被误读为"TestScope只做对了 12 件事、搞砸了 8 件"，
+// 但实际语义正相反——失败数是 TestScope在被测代码里"成功发现的问题信号"，数字越高代表它
 // 捕获到的风险越多，而不是它自身运行失败。这里用真实数据（不臆造根因聚类）生成一句明确结论。
 const failCount = summary.fail || 0;
 const totalCount = summary.total ?? results.length;
@@ -56,14 +56,14 @@ const distinctFailFiles = new Set(results.filter((r) => r.status === 'fail').map
 const srcModules = impact.srcFiles || [];
 const verdictBad = failCount > 0;
 const verdictTitle = verdictBad
-  ? `🐞 AI 测试官发现 ${failCount} 个问题信号`
-  : `✅ AI 测试官验证通过，未发现异常`;
+  ? `🐞 TestScope发现 ${failCount} 个问题信号`
+  : `✅ TestScope验证通过，未发现异常`;
 const verdictSub = verdictBad
-  ? `在本次共 ${totalCount} 项验证（单测 / API 冒烟 / UI 冒烟）中，AI 测试官成功捕获 ${failCount} 个失败用例` +
+  ? `在本次共 ${totalCount} 项验证（单测 / API 冒烟 / UI 冒烟）中，TestScope成功捕获 ${failCount} 个失败用例` +
     (distinctFailFiles ? `，分布于 ${distinctFailFiles} 个测试文件` : '') +
     (srcModules.length ? `，均与本次改动涉及的模块「${srcModules.map(esc).join('、')}」相关` : '') +
-    `。<b>这是 AI 测试官准确定位问题的证据——失败数越高代表它发现的风险越多，并不代表工具本身运行失败或被测代码整体质量的唯一标尺。</b>具体根因、复现方式与是否阻塞合入见下方明细。`
-  : `本次共执行 ${totalCount} 项验证（单测 / API 冒烟 / UI 冒烟），全部符合预期，AI 测试官未发现异常，可视为安全通过。`;
+    `。<b>这是 TestScope准确定位问题的证据——失败数越高代表它发现的风险越多，并不代表工具本身运行失败或被测代码整体质量的唯一标尺。</b>具体根因、复现方式与是否阻塞合入见下方明细。`
+  : `本次共执行 ${totalCount} 项验证（单测 / API 冒烟 / UI 冒烟），全部符合预期，TestScope未发现异常，可视为安全通过。`;
 
 const renderResults = results.map((r) => `
   <tr class="row-${statusClass[r.status] || ''}">
@@ -153,7 +153,7 @@ const renderNav = navItems.map((n) => `<a href="#${n.id}">${n.label}</a>`).join(
 const html = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>${esc(meta.title || 'AI 测试官报告')}</title>
+<title>${esc(meta.title || 'TestScope报告')}</title>
 <style>
   :root{
     --bg:#f6f2e9;--panel:#fffdf8;--panel2:#f3eee1;--line:#e5ddcc;--txt:#211c14;--sub:#6d6350;--dim:#a3987f;
@@ -303,7 +303,7 @@ const html = `<!DOCTYPE html>
 </style></head>
 <body>
 <header>
-  <div class="htop"><h1>${esc(meta.title || 'AI 测试官报告')}</h1></div>
+  <div class="htop"><h1>${esc(meta.title || 'TestScope报告')}</h1></div>
   <div class="metachips">
     <span class="chip">仓库 <b>${esc(meta.repo || '-')}</b></span>
     <span class="chip">场景 <b>${esc(meta.scenario || '-')}</b></span>
@@ -325,7 +325,7 @@ const html = `<!DOCTYPE html>
   <div class="statsrow">
     <div class="stat total"><b>${summary.total ?? results.length}</b><span class="label">总验证项</span><span class="sublabel">单测 + API 冒烟 + UI 冒烟</span></div>
     <div class="stat pass"><b>${summary.pass ?? '-'}</b><span class="label">符合预期</span><span class="sublabel">运行结果与断言一致</span></div>
-    <div class="stat fail"><b>${summary.fail ?? '-'}</b><span class="label">发现问题</span><span class="sublabel">AI 测试官捕获的异常信号</span></div>
+    <div class="stat fail"><b>${summary.fail ?? '-'}</b><span class="label">发现问题</span><span class="sublabel">TestScope捕获的异常信号</span></div>
     <div class="stat"><div class="ringstat">
       <div class="ring" style="--pct:${passPct}"><b>${passPct}%</b></div>
       <div class="rlabel">符合预期占比<b>${summary.pass ?? 0} / ${summary.total ?? 0}</b></div>
@@ -333,7 +333,7 @@ const html = `<!DOCTYPE html>
   </div>
 
   <div class="card" id="sec-timeline">
-    <h2><span class="icon">🧭</span>AI 测试官过程时间线</h2>
+    <h2><span class="icon">🧭</span>TestScope过程时间线</h2>
     <div class="timeline">${renderProcess || '<span class="muted-text">无过程信息</span>'}</div>
   </div>
 
@@ -439,7 +439,7 @@ const html = `<!DOCTYPE html>
     <ul class="blockinglist">${(summary.blocking || []).map((b) => `<li>${esc(b)}</li>`).join('') || '<li style="color:var(--ok)">✅ 无阻塞项，可放行</li>'}</ul>
   </div>
 </main>
-<footer>由「AI 测试官」自动生成 · 理解变更 → 规划策略 → 执行验证 → 可决策报告</footer>
+<footer>由「TestScope」自动生成 · 理解变更 → 规划策略 → 执行验证 → 可决策报告</footer>
 </body></html>`;
 
 await writeFile(outPath, html, 'utf8');

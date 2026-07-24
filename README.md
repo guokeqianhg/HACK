@@ -11,7 +11,7 @@ f:/HACK
 │   ├── tests/             # 零依赖单测（node:test）
 │   ├── smoke/             # api-smoke（离线兜底）/ ui-smoke（Playwright）
 │   └── docs/requirement.md# 场景 B 需求输入
-├── agent/                 # AI 测试官引擎 + MCP Server
+├── agent/                 # TestScope引擎 + MCP Server
 │   ├── run-test-officer.mjs  # 执行引擎（理解→规划→真实跑测→报告）
 │   ├── mcp-server.mjs        # ⭐ MCP Server 包裹（stdio + HTTP/SSE，供 Box/任意 MCP 客户端调度）
 │   ├── cron-monitor.mjs      # 场景 C 定时巡检 + 企微推送
@@ -102,7 +102,7 @@ npm test                 # 运行后端单测（node --test）
 node smoke/api-smoke.mjs # 离线 API 冒烟（场景 C 兜底）
 npm start                # 启动 SUT（http://127.0.0.1:3000）可用 Playwright 验证 UI
 ```
-**前端体验链路（可选，P0）**：在 `sample-app` 安装 Playwright 后，「AI 测试官」闭环会自动在 worktree 起 SUT 服务并用真实浏览器跑 `ui-smoke.spec.js`，把前端验证并入报告。
+**前端体验链路（可选，P0）**：在 `sample-app` 安装 Playwright 后，「TestScope」闭环会自动在 worktree 起 SUT 服务并用真实浏览器跑 `ui-smoke.spec.js`，把前端验证并入报告。
 ```bash
 cd sample-app
 npm i -D playwright        # 安装 @playwright/test（已写入 devDependencies）
@@ -133,7 +133,7 @@ node agent/run-test-officer.mjs --repo sample-app --base main --target feature/c
 cd sample-app
 git diff main feature/coupon-bug   # 查看改动（单文件：折扣券 9 折算成 1 折）
 ```
-真实可跑：AI 测试官读取 diff → 影响分析 → 运行 `node --test`、API 冒烟 `node smoke/api-smoke.mjs`，并在安装 Playwright 后自动追加真实浏览器 UI 冒烟（结账/折扣券路径）→ 生成含严重级别/根因/复现的报告。
+真实可跑：TestScope读取 diff → 影响分析 → 运行 `node --test`、API 冒烟 `node smoke/api-smoke.mjs`，并在安装 Playwright 后自动追加真实浏览器 UI 冒烟（结账/折扣券路径）→ 生成含严重级别/根因/复现的报告。
 （口径：`feature/coupon-bug` 相对 `main` 为**单文件改动**——`src/coupon.js` 折扣券漏写 `(1 - )`，把「9 折」算成「1 折」的资损级 bug。在 `main` 上全量回归全部通过（0 失败）；在 `feature/coupon-bug` 上，该 bug 会引发一组同源失败（折扣券本身 + 叠加/下单/API/UI 链路，以及 AI 生成的回归守卫命中）。场景 A 走「精准选测 + 自适应扩展选测」只跑受影响测试及其隐性关联测试，当前实测约为 **19 符合预期 / 10 个问题**（含 UI 冒烟与 2 个 AI 生成回归守卫命中）。以上数字会随 `tests/generated-*.test.js` 回归守卫的增减而变化，属正常现象，可随时通过 `node agent/run-test-officer.mjs --scenario A` 或 `node agent/demo.mjs` 现场重新产出验证，不依赖手工维护。）
 
 ## 通用性：任意仓库 / 远端 URL / 任意可视化目录
@@ -192,7 +192,7 @@ node agent/cron-monitor.mjs --branch feature/coupon-bug
 | 名称 | `AI测试官-场景C定时巡检` |
 | 触发 | 周期 FREQ=HOURLY;INTERVAL=1（每小时） |
 | 工作目录 | `f:/HACK` |
-| 提示词 | `执行 AI 测试官场景 C 持续巡检：在仓库 f:/HACK 运行 node agent/cron-monitor.mjs --once --branch main。脚本会全量回归并（若异常）经企微 webhook 推送告警、状态去重。运行后无需额外操作；若输出异常请简要汇总失败数与严重级。` |
+| 提示词 | `执行 TestScope场景 C 持续巡检：在仓库 f:/HACK 运行 node agent/cron-monitor.mjs --once --branch main。脚本会全量回归并（若异常）经企微 webhook 推送告警、状态去重。运行后无需额外操作；若输出异常请简要汇总失败数与严重级。` |
 
 > 注：当前 automation 桥接不可用时，可用系统调度器兜底——Windows `schtasks /create /tn "AICron" /tr "node f:/HACK/agent/cron-monitor.mjs --once --branch main" /sc hourly`；或 Linux/Mac 的 `crontab -e` 加 `0 * * * * cd /f/HACK && node agent/cron-monitor.mjs --once --branch main`。
 
@@ -226,13 +226,13 @@ node agent/run-test-officer.mjs --repo sample-app --base main --target feature/c
 
 ## 可视化报告
 报告看板 `report/index*.html` 由 `report/generate-report.mjs` 渲染（纯内联 CSS/JS，离线可用），包含：
-- **AI 测试官过程时间线**：理解变更 → 影响面分析 → 选测策略 → 执行验证 → 生成报告，逐步可视化（异常步高亮）。
+- **TestScope过程时间线**：理解变更 → 影响面分析 → 选测策略 → 执行验证 → 生成报告，逐步可视化（异常步高亮）。
 - **通过率进度条**：总用例 / 通过 / 失败 + 通过率百分比。
 - **需求覆盖度矩阵（场景 B）**：对每个需求点做「源码结构核对（模块存在/非桩）+ 测试覆盖」，状态含 ✅ 已实现 / ❌ 测试不达标 / ⛔ 无实现 / 🟠 疑似桩 / ⚠️ 未测试；需求点可声明 `tests`（用例名子串）做**用例级精确核对**，避免同模块多需求点「一损俱损」误报，直接暴露实现缺口与测试盲区。
 - **执行结果表**：用例 / 类型（unit/api/ui）/ 状态 / 严重级 / 根因 / 复现；前端 UI 未装 Playwright 时显示 `⏭ SKIP` 不计入通过率。
 
 ## 平台能力（Box/CodeBuddy）
-- **AI 测试官 MCP Server（形态出口，见「接入 Box 平台」节）**：`agent/mcp-server.mjs` 把五场景封装为标准 MCP 工具（`list_scenarios` / `run_test_officer` / `get_report`），Box 平台以「命令」或「URL（MCP 连接器）」两种方式接入即可调度，无需改业务代码。
+- **TestScope MCP Server（形态出口，见「接入 Box 平台」节）**：`agent/mcp-server.mjs` 把五场景封装为标准 MCP 工具（`list_scenarios` / `run_test_officer` / `get_report`），Box 平台以「命令」或「URL（MCP 连接器）」两种方式接入即可调度，无需改业务代码。
 - **TGit/工蜂 MCP（已接入 `/test-officer`）**：场景 A 真实调用 `get_merge_request_diff` 取 PR/MR diff → 写 `report/.mcp-diff.txt` → `run-test-officer.mjs --diff` 喂入，闭环跑测。
 - **TAPD MCP（已接入 `/test-officer`）**：场景 B 真实调用 `get_story`/`get_bug` 取需求/缺陷 → 整理为 fixture 写 `report/.mcp-req.json` → `run-test-officer.mjs --requirement` 喂入，产出覆盖度报告。
 - **Playwright MCP**：驱动真实浏览器（前端体验）；或沿用引擎内置的 `@playwright/test` UI 冒烟。
@@ -260,7 +260,7 @@ node agent/run-test-officer.mjs --repo sample-app --base main --target feature/c
 
 ## 接入 Box 平台（MCP 连接器 · 形态：Server）
 
-赛题推荐用 Box 平台的「MCP 连接器」能力。`agent/mcp-server.mjs` 把整个执行引擎包成一个**标准 MCP Server**，让 Box（或任意 MCP 客户端）以「命令」或「URL」两种方式接入，从而把"AI 测试官"作为可被平台调度/编排的标准工具。已通过 stdio 端到端真跑场景 A、HTTP/SSE 完成握手 + 列工具两项验证。
+赛题推荐用 Box 平台的「MCP 连接器」能力。`agent/mcp-server.mjs` 把整个执行引擎包成一个**标准 MCP Server**，让 Box（或任意 MCP 客户端）以「命令」或「URL」两种方式接入，从而把"TestScope"作为可被平台调度/编排的标准工具。已通过 stdio 端到端真跑场景 A、HTTP/SSE 完成握手 + 列工具两项验证。
 
 **暴露的工具：**
 - `list_scenarios` — 列出五场景语义与触发方式

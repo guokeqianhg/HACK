@@ -1,4 +1,4 @@
-// AI 测试官 · 场景 C 持续巡检 + 企微推送
+// TestScope · 场景 C 持续巡检 + 企微推送
 // 零依赖：定时/一次性对目标分支做全量回归，异常时通过企微机器人 webhook 推送，状态文件去重避免刷屏。
 //
 // 用法：
@@ -35,7 +35,7 @@ async function aiTriageSummary({ branch, summary, failItems }) {
       .join('\n');
     const { content, reasoning } = await chat({
       messages: [
-        { role: 'system', content: '你是「AI 测试官」的巡检研判助手。给定一次定时巡检发现的失败用例列表，请用中文输出一个 JSON：{"impact":"一句话研判受影响的核心能力/是否疑似资损或阻断级","priority":"P0|P1|P2","advice":"一句话处置建议"}。只输出 JSON，不要多余文字。' },
+        { role: 'system', content: '你是「TestScope」的巡检研判助手。给定一次定时巡检发现的失败用例列表，请用中文输出一个 JSON：{"impact":"一句话研判受影响的核心能力/是否疑似资损或阻断级","priority":"P0|P1|P2","advice":"一句话处置建议"}。只输出 JSON，不要多余文字。' },
         { role: 'user', content: `分支：${branch}\n失败 ${summary.fail} / 共 ${summary.total} 项。\n失败用例：\n${failText}` },
       ],
       temperature: 0.2,
@@ -61,7 +61,7 @@ const args = process.argv.slice(2).reduce((m, a, i, arr) => {
 }, {});
 
 if (args.help) {
-  console.log(`AI 测试官 · 场景 C 持续巡检 + 企微推送
+  console.log(`TestScope · 场景 C 持续巡检 + 企微推送
 用法：
   node agent/cron-monitor.mjs --branch <ref> [--repo <dir>] [--interval <秒>] [--reAlert <小时>]
                                 [--out <name>] [--webhook <url>] [--once] [--help]
@@ -147,8 +147,8 @@ async function checkOnce() {
   const triage = (status === 'unhealthy' && needPush) ? await aiTriageSummary({ branch, summary, failItems }) : null;
 
   const title = status === 'unhealthy'
-    ? '🚨 **AI 测试官 · 场景C 异常巡检**'
-    : '✅ **AI 测试官 · 场景C 巡检正常**';
+    ? '🚨 **TestScope · 场景C 异常巡检**'
+    : '✅ **TestScope · 场景C 巡检正常**';
   const lines = [
     title,
     `> 仓库：${report.meta.repo}　分支：${branch}`,
@@ -160,7 +160,7 @@ async function checkOnce() {
       lines.push('', `**🤖 AI 研判：** ${triage.impact || ''}${triage.priority ? `（${triage.priority}）` : ''}`);
       if (triage.advice) lines.push(`**处置建议：** ${triage.advice}`);
     }
-    lines.push('', `**AI 测试官捕获的问题（前 10）：**`);
+    lines.push('', `**TestScope捕获的问题（前 10）：**`);
     for (const f of failItems.slice(0, 10)) {
       lines.push(`- [${f.severity}] ${f.name}`);
       if (f.rootCause && f.rootCause !== '-') lines.push(`  \`${f.rootCause.slice(0, 160)}\``);

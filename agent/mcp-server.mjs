@@ -1,4 +1,4 @@
-// AI 测试官 · MCP Server（零依赖）
+// TestScope · MCP Server（零依赖）
 //
 // 把「理解变更 → 规划策略 → 执行验证 → 产出可决策报告」的执行引擎，包装成标准 MCP Server，
 // 让任意 MCP 客户端（含 Box 平台 MCP 连接器、CodeBuddy、Claude Desktop 等）都能调用。
@@ -41,7 +41,7 @@ const margs = process.argv.slice(2).reduce((m, a, i, arr) => {
 }, {});
 
 if (margs.help) {
-  console.log(`AI 测试官 · MCP Server（让任意 MCP 客户端调度五场景测试）
+  console.log(`TestScope · MCP Server（让任意 MCP 客户端调度五场景测试）
 用法：
   node agent/mcp-server.mjs                          # stdio 模式（默认，供 MCP 客户端以命令拉起）
   node agent/mcp-server.mjs --http --port 3001       # HTTP/SSE 模式（供 Box MCP 连接器以 URL 注册）
@@ -137,7 +137,7 @@ function summarizeReport(report, scenario, out, ran) {
   const conflict = report?.conflictAnalysis;
 
   const lines = [];
-  lines.push(`# AI 测试官 · 场景 ${scenario} 执行结果`);
+  lines.push(`# TestScope · 场景 ${scenario} 执行结果`);
   lines.push('');
   lines.push(`- 仓库：${meta.repo || '-'}`);
   lines.push(`- 触发：${meta.triggeredBy || '-'}`);
@@ -165,7 +165,7 @@ function summarizeReport(report, scenario, out, ran) {
 const TOOLS = [
   {
     name: 'list_scenarios',
-    description: '列出 AI 测试官支持的五个场景（A 代码改动 / B 需求驱动 / C 持续巡检 / D Bug 修复验证 / E 合并冲突检测）及其触发方式与产出。',
+    description: '列出 TestScope支持的五个场景（A 代码改动 / B 需求驱动 / C 持续巡检 / D Bug 修复验证 / E 合并冲突检测）及其触发方式与产出。',
     inputSchema: { type: 'object', properties: {}, required: [] },
     async run() {
       const s = [
@@ -175,13 +175,13 @@ const TOOLS = [
         ['D · Bug 修复验证', '缺陷基线复现 → 修复分支验证 → fail→pass 证据 + 有无回归', 'run_test_officer({scenario:"D", base, target})'],
         ['E · 合并冲突检测', '两分支各自通过 → 模拟合并跑测 → 抓语义冲突', 'run_test_officer({scenario:"E", base, target, merge})'],
       ];
-      const text = '# AI 测试官 · 五场景\n' + s.map(([n, d, c]) => `- **${n}**：${d}\n  - 调用：${c}`).join('\n');
+      const text = '# TestScope · 五场景\n' + s.map(([n, d, c]) => `- **${n}**：${d}\n  - 调用：${c}`).join('\n');
       return { content: [{ type: 'text', text }] };
     },
   },
   {
     name: 'run_test_officer',
-    description: '执行 AI 测试官某一场景：理解变更 → 规划策略 → 真实跑测 → 产出可决策报告。会真实运行单测/API/UI 冒烟（不 mock）。设 useDemoDefaults=true 可自动填入演示分支参数，零配置体验。',
+    description: '执行 TestScope某一场景：理解变更 → 规划策略 → 真实跑测 → 产出可决策报告。会真实运行单测/API/UI 冒烟（不 mock）。设 useDemoDefaults=true 可自动填入演示分支参数，零配置体验。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -256,7 +256,7 @@ async function dispatch(method, params) {
         capabilities: { tools: {} },
         serverInfo: { name: SERVER_NAME, version: VERSION },
         instructions:
-          'AI 测试官 MCP Server：用 list_scenarios 查看五场景，用 run_test_officer 执行（设 useDemoDefaults=true 可零配置体验）。执行结果为真实测试报告，非 mock。',
+          'TestScope MCP Server：用 list_scenarios 查看五场景，用 run_test_officer 执行（设 useDemoDefaults=true 可零配置体验）。执行结果为真实测试报告，非 mock。',
       };
     case 'ping':
       return {};

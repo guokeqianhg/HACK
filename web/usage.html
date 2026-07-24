@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>使用说明 · AI 测试官</title>
+<title>使用说明 · TestScope</title>
 <style>
   :root {
     --bg: #f6f2e9;
@@ -136,12 +136,12 @@
 <div class="wrap">
   <header>
     <div class="backrow">
-      <span class="badge"><span class="dot"></span>方向二 · AI 测试官</span>
+      <span class="badge"><span class="dot"></span>方向二 · TestScope</span>
       <a class="btn" href="/">← 返回控制台</a>
     </div>
     <h1>使用 <span class="grad">说明</span></h1>
     <p class="lead">
-      一句话介绍：AI 测试官是一个「会自动跑测试的 AI 助手」。你告诉它代码仓库和要检查什么，
+      一句话介绍：TestScope是一个「会自动跑测试的 AI 助手」。你告诉它代码仓库和要检查什么，
       它会<b>真实地把测试跑一遍</b>（不是瞎猜），然后给你一份「能不能合入/发布」的结论报告。
     </p>
   </header>
@@ -196,7 +196,7 @@
     <p><b>怎么拿到这个 webhook 地址</b>（30 秒）：</p>
     <ol>
       <li>在企业微信里打开你想接收通知的群 → 右上角「…」→「群机器人」→「添加」；</li>
-      <li>给机器人随便起个名字（如「AI 测试官」），创建后会生成一个 <code>https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx</code> 格式的地址；</li>
+      <li>给机器人随便起个名字（如「TestScope」），创建后会生成一个 <code>https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxxxxxx</code> 格式的地址；</li>
       <li>复制这个地址，粘贴到页面的「企微 webhook」框里，再点运行。</li>
     </ol>
     <p class="dim">跑完后群里就会收到机器人推送的消息：场景、通过/失败统计、问题清单摘要。适合场景 C（持续巡检）这类「跑完没人盯着看」的用法——出问题了群里自然会响。</p>
@@ -299,7 +299,7 @@
     </table>
 
     <h3>case3 · 真实公开开源仓库实测（通用性验证）</h3>
-    <p>case3 和 case1/case2 不同：<b>它不内置任何代码，被测对象是 GitHub 上真实的开源库</b>——用来证明 AI 测试官不是「只能跑自家示例」，给个公开仓库地址 + 分支就能跑。</p>
+    <p>case3 和 case1/case2 不同：<b>它不内置任何代码，被测对象是 GitHub 上真实的开源库</b>——用来证明 TestScope不是「只能跑自家示例」，给个公开仓库地址 + 分支就能跑。</p>
     <p class="dim"><b>被测对象</b>（都是测试用 <code>node:test</code> 编写、零第三方依赖、release tag 完整的小型库）：</p>
     <table>
       <tr><th>仓库</th><th>是什么</th><th>看点</th></tr>
@@ -427,7 +427,7 @@ AI_GATEWAY_SMALL_MODEL=deepseek-v4-flash  <span class="cm"># 快模型（轻量�
   </section>
 
   <footer>
-    AI 测试官 · 使用说明　|　<a href="/" style="color:var(--accent)">返回控制台</a><br>
+    TestScope · 使用说明　|　<a href="/" style="color:var(--accent)">返回控制台</a><br>
     所有测试结论均来自真实执行，AI 仅负责理解、选测与归因。
   </footer>
 </div>

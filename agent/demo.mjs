@@ -1,4 +1,4 @@
-// AI 测试官 · 离线一键 Demo（串起场景 A / B / C / D / E）
+// TestScope · 离线一键 Demo（串起场景 A / B / C / D / E）
 // 零依赖：纯本地 git + node --test + node smoke/api-smoke.mjs，评审现场可直接跑。
 //
 // 运行：node agent/demo.mjs
@@ -41,7 +41,7 @@ function scenarioCard(title, sub, base, report) {
   const s = report?.summary || {};
   const ok = s.fail === 0;
   const pct = s.total ? Math.round((s.pass / s.total) * 100) : 0;
-  // 措辞说明：ok=false 时不是"这个 Demo 场景跑失败了"，而是"AI 测试官在这个场景里真的抓到了 bug"——
+  // 措辞说明：ok=false 时不是"这个 Demo 场景跑失败了"，而是"TestScope在这个场景里真的抓到了 bug"——
   // 用"发现 N 个问题"而非"N 失败"，避免被误读为工具本身运行出错。
   const badge = !s.total ? '—' : ok ? '✅ 未发现异常' : `🐞 发现 ${s.fail} 个问题`;
   return `
@@ -74,7 +74,7 @@ async function runPool(jobs, concurrency) {
 }
 
 async function main() {
-  console.log('\n========== AI 测试官 · 离线五场景一键 Demo ==========\n');
+  console.log('\n========== TestScope · 离线五场景一键 Demo ==========\n');
   const concurrency = Number(process.env.DEMO_CONCURRENCY || 1);
   console.log(`（并发度 ${concurrency}；默认串行避免 LLM 限流，离线模式可设 DEMO_CONCURRENCY=3 提速）\n`);
 
@@ -131,7 +131,7 @@ async function main() {
   const html = `<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>AI 测试官 · 离线 Demo 总览</title>
+<title>TestScope · 离线 Demo 总览</title>
 <style>
   :root{--bg:#0b0e17;--panel:#12172a;--panel2:#161c33;--line:#232a45;--txt:#e7eaf6;--sub:#8993b8;--accent:#6d8dff;--accent2:#9b7dff;--ok:#3ddc97;--err:#ff6b81}
   *{box-sizing:border-box}
@@ -163,7 +163,7 @@ async function main() {
 </style></head>
 <body>
 <header>
-  <h1>🤖 AI 测试官 · 离线五场景 Demo 总览</h1>
+  <h1>🤖 TestScope · 离线五场景 Demo 总览</h1>
   <p>零依赖本地闭环：理解变更 → 规划选测 → 真实跑测 → 可决策报告。点击下方任一卡片查看详细报告。</p>
   <div class="livebadge"><span class="lb-dot"></span>实时看板：另开终端执行 <code>node report/live-server.mjs</code> 后打开 <code>http://127.0.0.1:5177</code>，可实时观看 Think→Act→Observe 执行过程</div>
 </header>

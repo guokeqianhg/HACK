@@ -1,4 +1,4 @@
-// AI 测试官 · 实时事件发射器（供 run-test-officer.mjs 在执行过程中上报进度）
+// TestScope · 实时事件发射器（供 run-test-officer.mjs 在执行过程中上报进度）
 //
 // 设计目标：让「理解 → 规划 → 执行 → 报告」的过程能被实时看到，而不是等跑完才看到一份静态 HTML。
 // 实现选择「写 NDJSON 文件 + 独立看板服务器 tail 该文件推送 SSE」而非直连 WebSocket/HTTP 上报，理由：

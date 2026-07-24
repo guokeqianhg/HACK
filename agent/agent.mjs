@@ -1,4 +1,4 @@
-// AI 测试官 · 轻量 ReAct Agent 运行时（类 LangGraph 的 Think→Act→Observe 状态机）
+// TestScope · 轻量 ReAct Agent 运行时（类 LangGraph 的 Think→Act→Observe 状态机）
 //
 // 设计理念（对应命题要求的经典 Agent 架构）：
 //   - Prompt Engineering：每个 Agent 有独立的 system 角色定义与任务约束。

@@ -69,7 +69,7 @@
   .row-ok{border-left:3px solid var(--ok)}
   .rootcause{max-width:360px;color:#5d5240;font-size:13px;line-height:1.65}
   .row-err .rootcause{color:#8c2a1d}
-  code{background:#f3eee1;padding:2px 7px;border-radius:5px;font-size:12px;color:#5d5240;border:1px solid var(--line)}
+  code{background:#f3eee1;padding:2px 7px;border-radius:5px;font-size:12px;color:#4a3d22;font-weight:600;border:1px solid var(--line)}
 
   /* 徽章 */
   .badge{display:inline-flex;align-items:center;font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap}
@@ -165,15 +165,15 @@
   <div class="verdict bad">
     <div class="vicon">🐞</div>
     <div>
-      <div class="vtitle">🐞 AI 测试官发现 2 个问题信号</div>
-      <div class="vsub">在本次共 2 项验证（单测 / API 冒烟 / UI 冒烟）中，AI 测试官成功捕获 2 个失败用例。<b>这是 AI 测试官准确定位问题的证据——失败数越高代表它发现的风险越多，并不代表工具本身运行失败或被测代码整体质量的唯一标尺。</b>具体根因、复现方式与是否阻塞合入见下方明细。</div>
+      <div class="vtitle">🐞 TestScope发现 2 个问题信号</div>
+      <div class="vsub">在本次共 2 项验证（单测 / API 冒烟 / UI 冒烟）中，TestScope成功捕获 2 个失败用例。<b>这是 TestScope准确定位问题的证据——失败数越高代表它发现的风险越多，并不代表工具本身运行失败或被测代码整体质量的唯一标尺。</b>具体根因、复现方式与是否阻塞合入见下方明细。</div>
     </div>
   </div>
 
   <div class="statsrow">
     <div class="stat total"><b>2</b><span class="label">总验证项</span><span class="sublabel">单测 + API 冒烟 + UI 冒烟</span></div>
     <div class="stat pass"><b>0</b><span class="label">符合预期</span><span class="sublabel">运行结果与断言一致</span></div>
-    <div class="stat fail"><b>2</b><span class="label">发现问题</span><span class="sublabel">AI 测试官捕获的异常信号</span></div>
+    <div class="stat fail"><b>2</b><span class="label">发现问题</span><span class="sublabel">TestScope捕获的异常信号</span></div>
     <div class="stat"><div class="ringstat">
       <div class="ring" style="--pct:0"><b>0%</b></div>
       <div class="rlabel">符合预期占比<b>0 / 2</b></div>
@@ -181,7 +181,7 @@
   </div>
 
   <div class="card" id="sec-timeline">
-    <h2><span class="icon">🧭</span>AI 测试官过程时间线</h2>
+    <h2><span class="icon">🧭</span>TestScope过程时间线</h2>
     <div class="timeline"><span class="muted-text">无过程信息</span></div>
   </div>
 
@@ -241,5 +241,5 @@
     <ul class="blockinglist"><li>折扣券资损 bug 必须修复后方可合入；建议补充金额精度与边界单测</li></ul>
   </div>
 </main>
-<footer>由「AI 测试官」自动生成 · 理解变更 → 规划策略 → 执行验证 → 可决策报告</footer>
+<footer>由「TestScope」自动生成 · 理解变更 → 规划策略 → 执行验证 → 可决策报告</footer>
 </body></html>
