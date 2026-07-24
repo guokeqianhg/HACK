@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import net from 'node:net';
-import { globSync } from 'node:fs';
+import { globSync } from './glob-shim.mjs'; // 兼容垫片：Node<22 也能用 glob
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { selectTests, isSourceFile, isTestFile, isRunnableTest, testsForModule, expandTests, listAllTests } from './select-tests.mjs';
@@ -71,10 +71,14 @@ const args = process.argv.slice(2).reduce((m, a, i, arr) => {
 if (args.help) {
   console.log(`AI 测试官 · 执行引擎（理解 diff → 规划 → 真实跑测 → 报告）
 用法：
-  node agent/run-test-officer.mjs --repo <dir> --base <ref> --target <ref> --scenario <A|B|C|D|E>
+  node agent/run-test-officer.mjs (--repo <dir> | --repo-url <git地址>) --base <ref> --target <ref> --scenario <A|B|C|D|E>
                                 [--requirement <json|md>] [--diff <file>] [--story <TAPD需求ID>] [--bug <TAPD缺陷ID>] [--out <name>] [--triggeredBy <text>]
                                 [--pr <MR合并请求IID>] [--pr-project <owner/repo>]
                                 [--webhook <url>] [--merge <ref>] [--buggy <ref>|--before <ref>]
+
+仓库来源（二选一）：
+  --repo <dir>       已存在的本地仓库目录（默认 sample-app）
+  --repo-url <url>   远端仓库地址（GitHub/工蜂等），引擎自动 clone 到临时目录再跑（含全部分支引用）
 
 场景：
   A  代码改动驱动：diff 来源优先级 = 外部 --diff 文件 > 工蜂真实 MR diff（--pr + TGIT_TOKEN 直连 REST）> 本地 git diff
@@ -98,7 +102,21 @@ if (args.help) {
   process.exit(0);
 }
 
-const repoDir = path.resolve(ROOT, args.repo || 'sample-app');
+// --repo-url：给一个远端仓库地址（GitHub/工蜂等），引擎自动 clone 到临时目录后再跑，
+//   免去"必须先有本地仓库"的前置。clone 目标在 main() 里完成（clone 是异步），故 repoDir 用 let。
+// 若同时给了 --repo，则 --repo 优先（视为已存在的本地仓库）。
+const repoUrl = args.repoUrl || args['repo-url'] || '';
+// --repo-subdir：clone 下来的仓库里，被测项目所在的子目录（如 monorepo 的 packages/app）。
+//   不传则以 clone 根目录为被测仓库。
+const repoSubdir = args.repoSubdir || args['repo-subdir'] || '';
+// 沙箱 clone 后 sample-app 在 case1/ 下；本地兼容两个目录名
+const defaultRepoDir = (() => {
+  for (const d of ['case1', 'sample-app']) { try { if (fs.statSync(path.join(ROOT, d)).isDirectory()) return d; } catch { /* 不存在 */ } }
+  return 'case1';
+})();
+let repoDir = args.repo
+  ? path.resolve(ROOT, args.repo)
+  : (repoUrl ? '' : path.resolve(ROOT, defaultRepoDir)); // repoUrl 情况下先留空，clone 后填入
 const base = args.base || 'main';
 const target = args.target || 'HEAD';
 const scenario = args.scenario || 'A';
@@ -109,6 +127,24 @@ const diffFile = args.diff || '';
 const fixBugId = args.bug || '';
 // 场景 E：合并冲突检测的另一个待合并分支
 const mergeBranch = args.merge || '';
+
+// 前端 UI 冒烟解耦配置（问题三：不再写死 sample-app 的启动方式/spec 路径）：
+//   --ui-start   在 worktree 内启动被测前端服务的命令（默认 "node src/server.js"）
+//   --ui-spec    Playwright spec 相对被测仓库根的路径（默认 "smoke/ui-smoke.spec.js"）
+//   --ui-ready   就绪探活的相对 URL 路径（默认 "/api/products"）
+//   传 --ui-off（或换仓库未配置 spec）时前端链路整体 SKIP，不阻塞后端闭环。
+const uiStartCmd = args['ui-start'] || process.env.UI_START_CMD || 'node src/server.js';
+const uiSpecRel = args['ui-spec'] || process.env.UI_SPEC || 'smoke/ui-smoke.spec.js';
+const uiReadyPath = args['ui-ready'] || process.env.UI_READY_PATH || '/api/products';
+const uiOff = args['ui-off'] === true || process.env.UI_OFF === '1';
+
+// 性能开关（体验优化）：
+//   FAST_MODE=1（或 --fast）：最少 LLM 调用模式——关闭最耗时的 ReAct 多轮规划（3+ 次调用/约 45s），
+//     只保留「语义理解（1 次，与跑测并行）+ 根因推理（1 次）」等必要调用。选测靠确定性导入图，
+//     结论完全不受影响（跑测事实决定对错）。演示/交互场景推荐开启，单场景可从约 2 分钟降到约 30-40s。
+//   ReAct 默认关闭（因其性价比低、耗时高）；需要展示 Agent 自主规划轨迹时用 ENABLE_REACT=1 显式开启。
+const FAST_MODE = args.fast === true || process.env.FAST_MODE === '1';
+const ENABLE_REACT = !FAST_MODE && (process.env.ENABLE_REACT === '1' || args.react === true);
 
 if (!['A', 'B', 'C', 'D', 'E'].includes(scenario)) {
   console.error(`❌ 非法 --scenario "${scenario}"，仅支持 A / B / C / D / E（用 --help 查看用法）`);
@@ -123,6 +159,7 @@ function git(cwd, ...argv) {
     p.stdout.on('data', (d) => (out += d));
     p.stderr.on('data', (d) => (out += d));
     p.on('close', (c) => (c === 0 ? res(out) : rej(new Error(out))));
+    p.on('error', rej);
   });
 }
 
@@ -192,10 +229,68 @@ function focusDiffToRepo(diffText, repoDir) {
   return focused || diffText.slice(0, 4000);
 }
 
+// 通用工具：把「可能是字符串 / 数组 / 逗号或换行分隔文本 / null」统一成去空字符串数组。
+// 只做结构归一化，不含任何业务关键词，适用于任意模型任意输入。
+function toStringArray(value, limit = 12) {
+  if (value == null) return [];
+  let arr;
+  if (Array.isArray(value)) arr = value;
+  else if (typeof value === 'string') arr = value.split(/[\n；;、,]+/);
+  else if (typeof value === 'object') arr = Object.values(value);
+  else arr = [value];
+  const out = [];
+  for (const item of arr) {
+    if (item == null) continue;
+    const s = (typeof item === 'string' ? item : (typeof item === 'object' ? (item.name || item.text || item.desc || JSON.stringify(item)) : String(item))).trim();
+    if (s && !out.includes(s)) out.push(s);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+// 通用工具：把风险等级归一到 high|medium|low（兼容中英文、大小写、别名如 critical/严重/中等）。
+function normalizeRiskLevel(value) {
+  const s = String(value == null ? '' : value).trim().toLowerCase();
+  if (!s) return '';
+  if (/(high|严重|高危|critical|blocker|major|重大|高)/.test(s)) return 'high';
+  if (/(low|轻微|低危|minor|trivial|低)/.test(s)) return 'low';
+  if (/(medium|中等|中危|moderate|中)/.test(s)) return 'medium';
+  return '';
+}
+
+// 通用工具：把模型可能给出的近义字段名，归一到本引擎使用的标准 schema。
+// 目标是「意思对但字段名/类型漂移」时不再直接判空丢弃，而是尽量映射进标准结构。
+function normalizeSemanticResult(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const pick = (...keys) => {
+    for (const k of keys) {
+      if (raw[k] != null && raw[k] !== '') return raw[k];
+    }
+    return undefined;
+  };
+  const intentVal = pick('intent', 'summary', 'change_intent', 'changeIntent', 'purpose', 'title', 'description', 'overview');
+  const intent = intentVal == null ? '' : (typeof intentVal === 'string' ? intentVal.trim() : String(intentVal).trim());
+  if (!intent) return null;
+  const riskLevel = normalizeRiskLevel(pick('riskLevel', 'risk_level', 'risk', 'severity', 'level')) || 'medium';
+  const result = {
+    intent,
+    riskLevel,
+    riskAreas: toStringArray(pick('riskAreas', 'risk_areas', 'affectedAreas', 'affected_areas', 'areas', 'files', 'changedFiles', 'changed_files')),
+    businessFlows: toStringArray(pick('businessFlows', 'business_flows', 'affectedScenarios', 'affected_scenarios', 'flows', 'scenarios', 'affectedFlows')),
+    recommendedFocus: toStringArray(pick('recommendedFocus', 'recommended_focus', 'focus', 'testFocus', 'test_focus', 'suggestions', 'recommendations', 'validationFocus')),
+    reasoning: (() => {
+      const r = pick('reasoning', 'rationale', 'analysis', 'why', 'explanation');
+      if (r == null) return '';
+      return typeof r === 'string' ? r.trim() : (Array.isArray(r) ? toStringArray(r).join('；') : String(r).trim());
+    })(),
+  };
+  return result;
+}
+
 async function semanticAnalyze(diffText, structural) {
   if (!isLLMEnabled()) return null;
   const system = `你是一名资深测试架构师，服务于「AI 测试官」。请对下面的代码 diff 做语义级理解：真正读懂改动意图、判断哪里可能出问题、可能影响哪些业务流程，并给出建议验证重点。
-请先逐步思考（你会在回复中看到自己的思考轨迹），再【只输出一个 JSON 对象】，不要任何额外文字，结构：
+请先逐步思考（你会在回复中看到自己的思考轨迹），再【只输出一个 JSON 对象】，不要任何额外文字，也不要 markdown 代码围栏。字段必须完全使用下列英文键名，值用中文描述，数组元素为字符串：
 {
   "intent": "一句话说明改动意图",
   "riskLevel": "high|medium|low",
@@ -212,14 +307,39 @@ async function semanticAnalyze(diffText, structural) {
         { role: 'user', content: user },
       ],
       temperature: 0.2,
-      maxTokens: 1200,
+      // 一次给足额度（含 CoT + JSON），避免被 length 截断成空 content 再触发重试；
+      // 这是可选的可读性增强，关掉空重试、设短超时，拿不到就回退结构分析，绝不 double 等待。
+      maxTokens: 2200,
+      retryOnEmpty: false,
+      timeoutMs: 40000,
       model: fastModel(),
     });
     if (reasoning) console.log('   🧠 思考轨迹：' + reasoning.replace(/\s+/g, ' ').slice(0, 200));
     // 思维链模型有时会把最终 JSON 放在 reasoning 中：content 与 reasoning 都尝试解析
-    const j = extractJSON(content) || extractJSON(reasoning);
-    if (!j || !j.intent) return null;
-    return j;
+    const rawJson = extractJSON(content) || extractJSON(reasoning);
+    const normalized = normalizeSemanticResult(rawJson);
+    if (normalized) return normalized;
+
+    // 首轮结构不达标（推理型快模型常把额度花在 CoT 上，正式 content 为空、
+    // 或字段严重漂移）：追加一次「把已产出内容重整成标准 JSON」的轻量修复。
+    // 素材优先用信息量更大的 reasoning（首轮分析多落在这里）；仅追加一轮，不放大调用次数。
+    const material = String(reasoning || content || '').slice(0, 4000);
+    if (!material) return null;
+    const { content: fixContent, reasoning: fixReasoning } = await chat({
+      messages: [
+        { role: 'system', content: '你是 JSON 规整器。请把下面的分析内容重整为一个严格的 JSON 对象，只输出 JSON、不要任何解释或代码围栏。键名固定为：intent(字符串)、riskLevel(仅 high/medium/low)、riskAreas(字符串数组)、businessFlows(字符串数组)、recommendedFocus(字符串数组)、reasoning(字符串)。缺失的信息按内容合理归纳，数组可为空但键必须存在。' },
+        { role: 'user', content: material },
+      ],
+      temperature: 0,
+      // 规整是最终成型步：给足额度并允许一次空 content 抬额度重试，把正式 JSON 挤出来。
+      maxTokens: 1200,
+      retryOnEmpty: true,
+      timeoutMs: 40000,
+      model: fastModel(),
+    });
+    const repaired = normalizeSemanticResult(extractJSON(fixContent) || extractJSON(fixReasoning));
+    if (repaired) console.log('   🔧 语义结果已重整为标准结构');
+    return repaired;
   } catch (e) {
     console.warn('⚠️ AI 语义分析失败，回退结构分析：', e.message);
     return null;
@@ -284,6 +404,8 @@ async function llmRootCause(diffText, failures, ctx) {
       messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
       temperature: 0.2,
       maxTokens: 1500,
+      // 推理型快模型在代理/内网网关下偶发排队 30s+，放宽到 45s；拿不到仍回退保留原始日志
+      timeoutMs: 45000,
       model: fastModel(),
     });
     if (reasoning) console.log('   🧠 根因推理轨迹：' + reasoning.replace(/\s+/g, ' ').slice(0, 200));
@@ -329,7 +451,24 @@ function buildTestNameFileMap(testFilesAbs) {
   return map;
 }
 
-function parseNodeTest(out, nameFileMap = new Map()) {
+function normalizeNodeTestName(rawName, nameFileMap = new Map()) {
+  const raw = String(rawName || '').trim();
+  const pathLike = raw.match(/tests[\\/][^\s]+\.test\.js|(?:[A-Za-z]:)?[^\s]*[\\/][^\s]+\.test\.js/);
+  if (pathLike) {
+    const full = pathLike[0];
+    return {
+      name: path.basename(full),
+      testFile: path.basename(full),
+    };
+  }
+  const name = raw.split(' (')[0].trim();
+  return {
+    name,
+    testFile: nameFileMap.get(name) || '',
+  };
+}
+
+function parseNodeTestSpec(out, nameFileMap = new Map()) {
   const results = [];
   const failByName = new Map();
   const seen = new Set();
@@ -337,14 +476,14 @@ function parseNodeTest(out, nameFileMap = new Map()) {
   for (const raw of out.split('\n')) {
     const line = raw.replace(/\r$/, '');
     if (/^✔ /.test(line)) {
-      const name = line.slice(2).split(' (')[0].trim();
+      const { name, testFile } = normalizeNodeTestName(line.slice(2), nameFileMap);
       if (!seen.has(name)) {
         seen.add(name);
-        results.push({ name, type: 'unit', status: 'pass', severity: '-', rootCause: '-', repro: 'node --test', testFile: nameFileMap.get(name) || '' });
+        results.push({ name, type: 'unit', status: 'pass', severity: '-', rootCause: '-', repro: 'node --test', testFile });
       }
       lastFailName = null;
     } else if (/^✖ /.test(line)) {
-      const name = line.slice(2).split(' (')[0].trim();
+      const { name, testFile } = normalizeNodeTestName(line.slice(2), nameFileMap);
       if (name === 'failing tests:') {
         lastFailName = null;
         continue;
@@ -352,7 +491,7 @@ function parseNodeTest(out, nameFileMap = new Map()) {
       lastFailName = name;
       if (!seen.has(name)) {
         seen.add(name);
-        const r = { name, type: 'unit', status: 'fail', severity: 'high', rootCause: '', repro: 'node --test', testFile: nameFileMap.get(name) || '' };
+        const r = { name, type: 'unit', status: 'fail', severity: 'high', rootCause: '', repro: 'node --test', testFile };
         failByName.set(name, r);
         results.push(r);
       }
@@ -370,6 +509,67 @@ function parseNodeTest(out, nameFileMap = new Map()) {
   }
   return results;
 }
+
+function parseNodeTestTap(out, nameFileMap = new Map()) {
+  const results = [];
+  const failByName = new Map();
+  const seen = new Set();
+  let lastFailName = null;
+  for (const raw of out.split('\n')) {
+    const line = raw.replace(/\r$/, '');
+    const m = line.match(/^(not )?ok\s+\d+\s+-\s+(.+)$/);
+    if (m) {
+      const isFail = !!m[1];
+      const { name, testFile } = normalizeNodeTestName(m[2], nameFileMap);
+      lastFailName = isFail ? name : null;
+      if (seen.has(name)) continue;
+      seen.add(name);
+      const item = {
+        name,
+        type: 'unit',
+        status: isFail ? 'fail' : 'pass',
+        severity: isFail ? 'high' : '-',
+        rootCause: isFail ? '' : '-',
+        repro: 'node --test',
+        testFile,
+      };
+      if (isFail) failByName.set(name, item);
+      results.push(item);
+      continue;
+    }
+    if (!lastFailName) continue;
+    const r = failByName.get(lastFailName);
+    if (!r) continue;
+    const trimmed = line.trim();
+    if (!trimmed || trimmed === '---' || trimmed === '...' || /^#\s/.test(trimmed)) continue;
+    if (/AssertionError|strictEqual|!==|expected|actual|ERR_TEST_FAILURE|failureType|error:/i.test(trimmed)) {
+      r.rootCause += trimmed + ' ';
+    }
+    if (/tests[\\/][\w.-]+\.test\.js/.test(trimmed) && !r.testFile) {
+      const f = trimmed.match(/tests[\\/][\w.-]+\.test\.js/)[0];
+      r.testFile = path.basename(f);
+    }
+  }
+  for (const r of results) {
+    if (r.status === 'fail' && !r.rootCause.trim()) r.rootCause = r.testFile || r.name;
+    else if (r.status === 'fail') r.rootCause = r.rootCause.trim();
+  }
+  return results;
+}
+
+function parseNodeTest(out, nameFileMap = new Map()) {
+  const specResults = parseNodeTestSpec(out, nameFileMap);
+  if (specResults.length) return specResults;
+  return parseNodeTestTap(out, nameFileMap);
+}
+
+async function runNodeUnitTests(cwd, runTests) {
+  const specArgs = ['--test', '--test-reporter=spec', ...runTests];
+  const specOut = await run(cwd, 'node', specArgs);
+  if (!/bad option:\s*--test-reporter=spec/i.test(specOut.out || '')) return specOut;
+  return await run(cwd, 'node', ['--test', ...runTests]);
+}
+
 
 function parseApiSmoke(out) {
   const results = [];
@@ -540,32 +740,46 @@ function getFreePort() {
 // 前端体验链路（可选）：仅当 sample-app 已安装 @playwright/test 时生效；否则优雅跳过，不阻塞后端闭环。
 // 做法：在 worktree 起 SUT 服务（测试目标 ref 的真实前端）→ 用主仓库已装的 Playwright 驱动浏览器访问该服务。
 // （ui-smoke.spec.js 仅做环境无关的浏览器操作，故复用主仓库副本即可，避免在每个 worktree 重复装浏览器。）
+// 把 uiStartCmd（如 "node src/server.js" 或 "npm run start:test"）拆成 spawn 用的 command/args。
+// 极简 shell 词法：按空白切分，支持双引号包裹带空格的参数（覆盖绝大多数启动命令）。
+function parseStartCmd(cmd) {
+  const tokens = String(cmd).match(/"[^"]*"|\S+/g) || [];
+  const parts = tokens.map((t) => t.replace(/^"|"$/g, ''));
+  return { command: parts[0] || 'node', args: parts.slice(1) };
+}
+
 async function runUiSmoke(sutInWt) {
+  const skip = (reason) => ([makeUiSkip(reason)]);
+  // 显式关闭前端链路（换仓库/无前端时）：整体 SKIP，不阻塞后端闭环
+  if (uiOff) return skip('已通过 --ui-off / UI_OFF 关闭前端 UI 冒烟');
   // Windows 上 .bin/playwright 实为 .cmd 包装；直接 spawn 无扩展名会 ENOENT，需用平台正确路径
   const pwBase = path.join(repoDir, 'node_modules', '.bin', 'playwright');
   const pwBin = process.platform === 'win32' && fs.existsSync(pwBase + '.cmd') ? pwBase + '.cmd' : pwBase;
-  const specFile = path.join(repoDir, 'smoke', 'ui-smoke.spec.js');
-  const skip = (reason) => ([makeUiSkip(reason)]);
+  // spec 路径可配置（相对被测仓库根）：默认 smoke/ui-smoke.spec.js，换仓库可用 --ui-spec 指定
+  const specFile = path.join(repoDir, ...uiSpecRel.split(/[\\/]/));
   if (!fs.existsSync(pwBin)) {
-    return skip('环境未安装 @playwright/test（前端链路跳过）。在 sample-app 执行 `npm i -D playwright && npx playwright install chromium` 后生效。');
+    return skip('环境未安装 @playwright/test（前端链路跳过）。在被测仓库执行 `npm i -D playwright && npx playwright install chromium` 后生效。');
   }
-  if (!fs.existsSync(specFile)) return skip('未找到 ui-smoke.spec.js');
+  if (!fs.existsSync(specFile)) return skip(`未找到 UI spec：${uiSpecRel}（换仓库可用 --ui-spec 指定，或 --ui-off 关闭）`);
   const browserSkip = playwrightBrowserSkipReason();
   if (browserSkip) return skip(browserSkip);
 
   const port = await getFreePort();
   const base = `http://127.0.0.1:${port}`;
-  const server = spawn('node', ['src/server.js'], { cwd: sutInWt, env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', ENABLE_TEST_RESET: '1' }, windowsHide: true });
+  // 启动被测前端服务：命令可配置（--ui-start / UI_START_CMD），默认 node src/server.js
+  const { command: startBin, args: startArgs } = parseStartCmd(uiStartCmd);
+  const server = spawn(startBin, startArgs, { cwd: sutInWt, env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', ENABLE_TEST_RESET: '1' }, windowsHide: true, shell: process.platform === 'win32' });
   let uiResults;
   try {
-    // 等待 SUT 就绪
+    // 等待 SUT 就绪（探活路径可配置：--ui-ready，默认 /api/products）
+    const readyUrl = `${base}${uiReadyPath.startsWith('/') ? '' : '/'}${uiReadyPath}`;
     let ready = false;
     for (let i = 0; i < 50; i++) {
-      try { const r = await fetch(`${base}/api/products`); if (r.ok) { ready = true; break; } } catch {}
+      try { const r = await fetch(readyUrl); if (r.ok) { ready = true; break; } } catch {}
       await new Promise((r) => setTimeout(r, 200));
     }
     if (!ready) {
-      uiResults = [{ name: '前端 UI 冒烟（Playwright）', type: 'ui', status: 'fail', severity: 'high', rootCause: 'SUT 服务未能在 worktree 启动（前端链路无法验证）', repro: 'npm start', testFile: 'ui-smoke.spec.js' }];
+      uiResults = [{ name: '前端 UI 冒烟（Playwright）', type: 'ui', status: 'fail', severity: 'high', rootCause: `SUT 服务未能在 worktree 启动（前端链路无法验证）；启动命令：${uiStartCmd}`, repro: uiStartCmd, testFile: uiSpecRel }];
     } else {
       // spec 路径统一转正斜杠：Playwright 把位置参数当正则过滤，反斜杠会被误判导致 "No tests found"
       const specArg = specFile.replace(/\\/g, '/');
@@ -582,20 +796,40 @@ async function runUiSmoke(sutInWt) {
   return uiResults;
 }
 
+// 临时目录名：时间戳 + 随机后缀。有界并发下同毫秒的两个运行必须拿到不同目录，
+// 否则 git clone/worktree 会因目录撞名失败（并发实测暴露的问题）。
+function tmpDirName(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// repoDir 相对 git 仓库根的前缀（如 "case2"；仓库根目录时为空串）。
+// 必须用 git 自己算（rev-parse --show-prefix）：Windows 上 os.tmpdir() 给出 8.3 短名路径
+// （THELET~1），而 git --show-toplevel 给长名路径（Theletguo），字符串相对化会因前缀不一致
+// 算出 "../../" 逃逸，使 sutInWt 指回原始仓库而非 worktree——Windows 本地实测：全部测试跑在
+// main 内容上，缺陷分支 bug 被漏检。Linux/macOS 无此问题但同样适用。
+async function repoPrefixFromGit() {
+  return (await git(repoDir, 'rev-parse', '--show-prefix')).trim().replace(/\/+$/, '');
+}
+
 async function runInWorktree(targetRef, testFiles, opts = {}) {
-  const { skipUnit = false, skipApi = false, skipUi = false } = opts;
-  const wt = path.join(os.tmpdir(), `aio-${Date.now()}`);
+  const { skipUnit = false, skipApi = false, skipUi = false, reglob = false } = opts;
+  const wt = path.join(os.tmpdir(), tmpDirName('aio'));
   let testOut, smokeOut, uiOut = [];
   let nameFileMap = new Map();
   try {
     await git(repoDir, 'worktree', 'add', '--detach', wt, targetRef);
-    const sutInWt = path.join(wt, path.relative(ROOT, repoDir)); // worktree 含整个仓库树，SUT 在 wt/<相对路径>
+    const sutInWt = path.join(wt, await repoPrefixFromGit()); // worktree 含整个仓库树，SUT 在 wt/<前缀>
     // 把仓库内绝对测试路径映射到 worktree 内对应路径（精准选测的子集，或全量兜底）
     const wtTestFiles = testFiles.map((f) => path.join(sutInWt, path.relative(repoDir, f)));
-    const runTests = wtTestFiles.length ? wtTestFiles : globSync(path.join(sutInWt, 'tests', '*.test.js'));
-    // 显式锁定 spec reporter：node:test 默认 reporter 受环境/版本影响，
-    // 锁定后 parseNodeTest 才能稳定按 ✔/✖ 行解析，避免解析失败导致结果丢失
-    if (!skipUnit) testOut = await run(sutInWt, 'node', ['--test', '--test-reporter=spec', ...runTests]);
+    // reglob=true（场景 E 基线/合并全量跑测）：分支可能各自新增了测试文件，base 态算出的静态列表不含它们，
+    // 必须在 worktree 内重新 glob，否则分支新增测试永远不会被执行（曾致语义冲突漏检）。
+    const runTests = reglob
+      ? globSync(path.join(sutInWt, 'tests', '*.test.js'))
+      : (wtTestFiles.length ? wtTestFiles : globSync(path.join(sutInWt, 'tests', '*.test.js')));
+    // 优先使用 spec reporter（新版本 Node 可逐用例解析）；旧版本 Node 自动回退默认 TAP，
+    // 至少保证单测文件级结果不会丢失。
+    if (!skipUnit) testOut = await runNodeUnitTests(sutInWt, runTests);
+
     if (!skipApi) smokeOut = await run(sutInWt, 'node', ['smoke/api-smoke.mjs']);
     // 前端体验链路（可选）：失败或异常不影响后端闭环结果
     if (!skipUi) {
@@ -628,7 +862,7 @@ async function runInWorktree(targetRef, testFiles, opts = {}) {
 // 在 baseRef 上分别 merge targetRef 和 mergeRef，得到一个临时 merge 提交，然后全量跑测。
 // 返回合并后的测试结果 + merge diff（供 AI 冲突根因分析）。
 async function runMergeTest({ baseRef, targetRef, mergeRef, testFiles }) {
-  const wt = path.join(os.tmpdir(), `aio-merge-${Date.now()}`);
+  const wt = path.join(os.tmpdir(), tmpDirName('aio-merge'));
   let mergeDiff = '';
   try {
     // 1) 在 baseRef 上创建临时 worktree
@@ -642,27 +876,36 @@ async function runMergeTest({ baseRef, targetRef, mergeRef, testFiles }) {
       if (!mergeEnv[k]) mergeEnv[k] = v;
     }
     const gitInWt = (args) => run(repoDir, 'git', ['-C', wt, ...args], { env: mergeEnv });
+    // 在 worktree 存活期内提前捕获两个分支相对 base 的 diff，供后续 AI 冲突分析使用。
+    // 不在分析阶段才回到 repoDir 现取——那时再做 spawn git 在个别环境（Makers 沙箱实测）会
+    // 莫名 ENOENT 失败，早捕获既不改变内容（分支 ref 固定）又消除晚期依赖。
+    const diffA = (await gitInWt(['diff', `${baseRef}..${targetRef}`, '--', '.'])).out || '';
+    const diffB = (await gitInWt(['diff', `${baseRef}..${mergeRef}`, '--', '.'])).out || '';
     // merge targetRef
     const merge1 = await gitInWt(['merge', '--no-edit', '--no-ff', targetRef]);
     if (merge1.code !== 0) {
-      return { results: [{ name: '合并失败', type: 'merge', status: 'fail', severity: 'critical', rootCause: `无法合并 ${targetRef} 到 ${baseRef}：${merge1.out.slice(0, 200)}`, repro: `git merge ${targetRef}`, testFile: '' }], mergeDiff: merge1.out };
+      return { results: [{ name: '合并失败', type: 'merge', status: 'fail', severity: 'critical', rootCause: `无法合并 ${targetRef} 到 ${baseRef}：${merge1.out.slice(0, 200)}`, repro: `git merge ${targetRef}`, testFile: '' }], mergeDiff: merge1.out, diffA, diffB };
     }
     // merge mergeRef
     const merge2 = await gitInWt(['merge', '--no-edit', '--no-ff', mergeRef]);
     if (merge2.code !== 0) {
       // 合并冲突（文本冲突，git 已检测到，这是预期内的情况之一）
-      return { results: [{ name: `合并冲突（${targetRef} + ${mergeRef}）`, type: 'merge', status: 'fail', severity: 'high', rootCause: `git 文本冲突：${merge2.out.slice(0, 200)}`, repro: `git merge ${mergeRef}`, testFile: '' }], mergeDiff: merge2.out };
+      return { results: [{ name: `合并冲突（${targetRef} + ${mergeRef}）`, type: 'merge', status: 'fail', severity: 'high', rootCause: `git 文本冲突：${merge2.out.slice(0, 200)}`, repro: `git merge ${mergeRef}`, testFile: '' }], mergeDiff: merge2.out, diffA, diffB };
     }
     // 3) 获取 merge diff（相对 base）
     const diffOut = await gitInWt(['diff', `${baseRef}..HEAD`, '--', '.']);
     mergeDiff = diffOut.out || '';
     // 4) 全量跑测
-    const sutInWt = path.join(wt, path.relative(ROOT, repoDir));
+    const sutInWt = path.join(wt, await repoPrefixFromGit());
     const wtTestFiles = testFiles.map((f) => path.join(sutInWt, path.relative(repoDir, f)));
-    const runTests = wtTestFiles.length ? wtTestFiles : globSync(path.join(sutInWt, 'tests', '*.test.js'));
+    // 合并态全量跑测必须在 worktree 内重新 glob：两个分支各自新增的测试文件不在 base 态列表里，
+    // 不重新发现就永远跑不到它们，合并引入的失败会被完全漏掉。
+    const globbed = globSync(path.join(sutInWt, 'tests', '*.test.js'));
+    const runTests = globbed.length ? globbed : wtTestFiles;
     const nameFileMap = buildTestNameFileMap(runTests);
-    const testOut = await run(sutInWt, 'node', ['--test', '--test-reporter=spec', ...runTests]);
+    const testOut = await runNodeUnitTests(sutInWt, runTests);
     const smokeOut = await run(sutInWt, 'node', ['smoke/api-smoke.mjs']);
+
     const results = [...parseNodeTest(testOut.out, nameFileMap), ...parseApiSmoke(smokeOut.out)];
     // 尝试 UI 冒烟
     try {
@@ -671,7 +914,7 @@ async function runMergeTest({ baseRef, targetRef, mergeRef, testFiles }) {
     } catch {
       results.push({ name: '前端 UI 冒烟（Playwright）', type: 'ui', status: 'skip', severity: '-', rootCause: 'UI 链路跳过（Playwright 未安装或异常）', repro: 'playwright test', testFile: 'ui-smoke.spec.js' });
     }
-    return { results, mergeDiff };
+    return { results, mergeDiff, diffA, diffB };
   } finally {
     await git(repoDir, 'worktree', 'remove', '--force', wt).catch(() => {});
   }
@@ -792,12 +1035,13 @@ async function runGeneratedTest(targetRef, relTestPath, content) {
   const wt = path.join(os.tmpdir(), `aio-gen-${Date.now()}`);
   try {
     await git(repoDir, 'worktree', 'add', '--detach', wt, targetRef);
-    const sutInWt = path.join(wt, path.relative(ROOT, repoDir));
+    const sutInWt = path.join(wt, await repoPrefixFromGit());
     const abs = path.join(sutInWt, relTestPath);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, content, 'utf8');
-    const res = await run(sutInWt, 'node', ['--test', '--test-reporter=spec', abs]);
+    const res = await runNodeUnitTests(sutInWt, [abs]);
     const parsed = parseNodeTest(res.out);
+
     const hasFail = parsed.some((r) => r.status === 'fail');
     const hasPass = parsed.some((r) => r.status === 'pass');
     return { status: hasFail ? 'fail' : hasPass || parsed.length ? 'pass' : 'error', out: res.out };
@@ -1178,7 +1422,7 @@ async function llmExtractRequirementPoints(reqText, repoDir) {
 请自主读懂它，拆解出「应当被验证的测试点」列表。
 规则：
 - 每个测试点尽量归属到下方【候选源码模块】中的一个真实路径；若确实无法判断，module 留空字符串，禁止编造不存在的路径。
-- 测试点要具体、可验证（如"满减券未达门槛应拒绝"而非泛泛的"测试优惠券"）。
+- 测试点要具体、可验证（如"输入非法参数时应返回明确错误"而非泛泛的"测试一下该功能"）。
 - 只输出一个 JSON 数组，不要任何额外文字：[{"id":"P1","desc":"测试点描述","module":"src/xxx.js 或空字符串"}]`;
   const user = `原始需求/缺陷文本：\n${String(reqText).slice(0, 4000)}\n\n候选源码模块（仅可从中选择，勿编造）：\n${candidates.join('\n') || '（无候选，均留空）'}`;
   try {
@@ -1201,15 +1445,27 @@ async function llmExtractRequirementPoints(reqText, repoDir) {
   }
 }
 
+// re-export 目标解析（仅相对路径；裸模块名视为依赖，不跟随）。
+function resolveReExportTarget(fromFileAbs, spec) {
+  const base = path.resolve(path.dirname(fromFileAbs), spec);
+  for (const t of [base, `${base}.js`, `${base}.mjs`, `${base}.cjs`, path.join(base, 'index.js')]) {
+    try { if (fs.statSync(t).isFile()) return path.resolve(t); } catch { /* noop */ }
+  }
+  return null;
+}
+
 // 场景 B：通用「实现核对」探针 —— 仅基于模块结构判断需求点是否真的有代码落地，
 // 不读取/匹配任何业务关键词，对任意 repo 与需求 fixture 可复用（防过拟合）。
 // 判定信号：模块是否存在、是否存在非桩的实质实现（函数/类/导出 + 足够代码行）。
-function probeImplementation(repoDir, moduleRel) {
+// re-export 跟随：入口文件仅有 `export ... from './x'` 时（如 unified 生态的 index.js），
+// 顺到真实实现文件再判，避免把「纯转发的入口」误判为疑似桩。
+function probeImplementation(repoDir, moduleRel, depth = 0) {
   const base = { exists: false, hasImpl: false, lines: 0, codeLines: 0 };
   if (!moduleRel) return { ...base, note: '未指定模块' };
+  const abs = path.resolve(repoDir, moduleRel);
   let src;
   try {
-    src = fs.readFileSync(path.resolve(repoDir, moduleRel), 'utf8');
+    src = fs.readFileSync(abs, 'utf8');
   } catch {
     return { ...base, note: '源码模块不存在' };
   }
@@ -1221,6 +1477,14 @@ function probeImplementation(repoDir, moduleRel) {
   // 通用「非桩」判定：存在函数/类/导出/赋值等实质实现结构（与具体业务名无关）
   const hasStructure = /(function\s+\w+|const\s+\w+\s*=|let\s+\w+\s*=|class\s+\w+|=>\s*\{|export\s+(default\s+)?(function|class|const|let|var|\{)|\bmodule\.exports)/.test(src);
   const hasImpl = hasStructure && codeLines >= 3;
+  if (!hasImpl && depth < 2) {
+    const m = src.match(/(?:export|import)\s[^'"]*?\sfrom\s*['"](\.[^'"]+)['"]/);
+    const target = m ? resolveReExportTarget(abs, m[1]) : null;
+    if (target) {
+      const rel2 = path.relative(repoDir, target);
+      if (rel2 && !rel2.startsWith('..')) return probeImplementation(repoDir, rel2, depth + 1);
+    }
+  }
   return {
     exists: true,
     hasImpl,
@@ -1394,7 +1658,7 @@ async function planWithReActAgent({ repoDir, diffText, impact, sel, officerCtx, 
       system,
       task,
       tools,
-      maxSteps: 6,
+      maxSteps: 4,
       model: fastModel(),
       temperature: 0,
       maxTokens: 1200,
@@ -1431,6 +1695,15 @@ async function planWithReActAgent({ repoDir, diffText, impact, sel, officerCtx, 
 // ---------- PR/MR 自动回写闭环（问题2）：跑完 → 在工蜂(TGit) MR 下评论测试结果 ----------
 // 有 TGIT_TOKEN + --pr <iid> 时经工蜂 REST API 真实回写；否则优雅降级为写 report/pr-comment.md（dry-run），
 // 与现有 webhook 风格一致，保证离线 Demo 不受影响。
+// 报告链接：部署在有 HTTP 服务的环境（如 AnyDev preview-server）时，配置 PUBLIC_BASE_URL
+// 拼出可点击的完整 URL（企微/PR 里点开即看）；本地 CLI 无 HTTP 服务时退化为相对路径
+// report/<outName>.html（仅提示文件位置）。未配置时保持原行为，兼容离线。
+function reportUrlFor(outName) {
+  const base = (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+  const rel = `report/${outName}.html`;
+  return base ? `${base}/${rel}` : rel;
+}
+
 function buildPRComment({ report, reportUrl }) {
   const s = report.summary;
   const passRate = s.total ? Math.round((s.pass / s.total) * 100) : 0;
@@ -1554,10 +1827,10 @@ async function fetchTAPDBug({ bugId, workspaceId, apiBase = TAPD_API_BASE }) {
   return tapdToMarkdown({ kind: 'bug', id: bug.id, name: bug.title || bug.name, description: bug.description });
 }
 
-async function commentToPR({ report }) {
+async function commentToPR({ report, outName }) {
   const prIid = args.pr;
   if (!prIid || prIid === true) return; // 未指定 --pr 则不启用 PR 回写
-  const body = buildPRComment({ report, reportUrl: 'report/index.html' });
+  const body = buildPRComment({ report, reportUrl: outName ? reportUrlFor(outName) : '' });
   const token = process.env.TGIT_TOKEN || process.env.GIT_TOKEN || '';
   const project = resolveTGitProject();
   const apiBase = process.env.TGIT_API_BASE || 'https://git.woa.com/api/v3';
@@ -1595,10 +1868,10 @@ async function commentToPR({ report }) {
 // ---------- 企微机器人真实推送（闭环收口：跑完 → 实时推送给值班/开发）----------
 // 配置 --webhook <url> 或 WEBHOOK_URL 时经企微机器人 webhook 真实推送（与 cron-monitor 同协议）；否则跳过，保持离线零依赖。
 // 企微 markdown 正文限制 4096 字节，超长截断以免推送被拒；推送失败/异常时降级落盘 report/.officer-last-message.md。
-async function pushToWeChat({ report }) {
+async function pushToWeChat({ report, outName }) {
   const webhook = args.webhook || process.env.WEBHOOK_URL || '';
   if (!webhook || webhook === true) return;
-  const content = buildPRComment({ report, reportUrl: 'report/index.html' });
+  const content = buildPRComment({ report, reportUrl: outName ? reportUrlFor(outName) : '' });
   const md = content.length > 4000 ? content.slice(0, 4000) + '\n…(正文过长已截断)' : content;
   try {
     const resp = await fetch(webhook, {
@@ -1619,21 +1892,80 @@ async function pushToWeChat({ report }) {
   }
 }
 
+// 把远端仓库 clone 到临时目录（供 --repo-url 用）。默认浅克隆全部分支引用，
+// 保证后续 base/target/merge 分支都能被 worktree 解析到；失败抛错交由 main 捕获。
+async function cloneRemoteRepo(url) {
+  const dir = path.join(os.tmpdir(), tmpDirName('aio-clone'));
+  // 本地路径（相对/绝对、file:// 除外的普通路径）先解析成绝对路径，避免受 git 子进程 cwd 影响；
+  // 远端 URL（http(s)/git/ssh/file:// 等含协议或 scp 语法 user@host:path）原样传给 git。
+  const isRemote = /^(?:[a-z][a-z0-9+.-]*:\/\/|git@|[^/\\]+@[^/\\]+:)/i.test(url);
+  const src = isRemote ? url : path.resolve(ROOT, url);
+  console.log(`📥 clone 远端仓库：${src}`);
+  liveEmit?.({ type: 'log', phase: 'understand', detail: `📥 clone 远端仓库 ${src}` });
+  // --no-single-branch + 拉全部分支：确保 --base/--target/--merge 指向的分支在本地可解析。
+  // http.version=HTTP/1.1：规避 GnuTLS recv error (-110)——跨境/代理链路中间设备常重置 HTTP/2
+  // 多路复用连接导致 TLS 非预期断开（git 社区公认规避法），对任意远端仓库通用；
+  // 叠加最多 3 次重试，进一步吸收网络抖动（沙箱/CI → GitHub 间歇失败实测常见）。
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await git(ROOT, '-c', 'http.version=HTTP/1.1', 'clone', '--no-single-branch', src, dir);
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      fs.rmSync(dir, { recursive: true, force: true });
+      if (attempt < 3) {
+        console.warn(`   ⚠️ clone 第 ${attempt} 次失败（${String(e.message || e).slice(0, 160)}），3s 后重试…`);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+  }
+  if (lastErr) throw lastErr;
+  // 为所有远端分支建立本地引用（worktree add 需要本地可解析的 ref）
+  try {
+    const branches = (await git(dir, 'branch', '-r')).split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.includes('->') && l.startsWith('origin/'))
+      .map((l) => l.replace(/^origin\//, ''));
+    for (const br of branches) {
+      await git(dir, 'branch', br, `origin/${br}`).catch(() => {}); // 已存在则忽略
+    }
+  } catch { /* 建本地分支失败不阻断，worktree 阶段会再报明确错误 */ }
+  return dir;
+}
+
 async function main() {
   const WALL0 = Date.now();
   const perf = () => `⏱ 性能：wall ${((Date.now() - WALL0) / 1000).toFixed(1)}s ｜ LLM ${_llmStats.calls} 次调用累计 ${(_llmStats.ms / 1000).toFixed(1)}s`;
   const outName = args.out || 'report';
+
+  // 远端仓库自动 clone（--repo-url）：clone 完成后填入 repoDir，后续逻辑与本地仓库完全一致
+  let liveBound = false;
+  if (!repoDir && repoUrl) {
+    liveEmit = makeLiveEmitter(outName);
+    liveBound = true;
+    const cloneRoot = await cloneRemoteRepo(repoUrl);
+    // 被测项目若在仓库子目录（monorepo），用 --repo-subdir 指向它；否则以 clone 根为被测仓库。
+    repoDir = repoSubdir ? path.join(cloneRoot, ...repoSubdir.split(/[\\/]/)) : cloneRoot;
+    if (!fs.existsSync(repoDir)) {
+      throw new Error(`--repo-subdir 指向的目录在 clone 仓库中不存在：${repoSubdir}`);
+    }
+  }
+
   const reportJsonPath = path.join(ROOT, 'report', `${outName}.json`);
 
   // 绑定实时事件发射器：后续每个阶段会写一行 NDJSON，供 report/live-server.mjs 起的看板订阅展示
   // Think→Act→Observe 的真实执行过程（不影响主流程，写失败也静默忽略）。
-  liveEmit = makeLiveEmitter(outName);
-  liveEmit({ type: 'meta', title: `场景 ${scenario}`, detail: `${args.repo || 'sample-app'} · ${triggeredBy}`, scenario, outName });
+  // （若上面 clone 阶段已初始化则复用，避免覆盖丢失 clone 日志）
+  if (!liveBound) liveEmit = makeLiveEmitter(outName);
+  const repoLabel = repoUrl || args.repo || 'sample-app';
+  liveEmit({ type: 'meta', title: `场景 ${scenario}`, detail: `${repoLabel} · ${triggeredBy}`, scenario, outName });
 
   // 预热快模型代理：首次调用常因代理冷启动慢 10~30s。这里在后台提前发一个极小请求，
   // 与后续的 git 解析 / 选测 / 首轮跑测（约 30s）并行，避免冷启动落在关键路径上。
   if (isLLMEnabled() && hasFastModel()) {
-    chat({ model: fastModel(), maxTokens: 8, temperature: 0, messages: [{ role: 'user', content: 'ping' }], stats: false }).catch(() => {});
+    chat({ model: fastModel(), maxTokens: 8, minAnswerTokens: 0, temperature: 0, messages: [{ role: 'user', content: 'ping' }], stats: false }).catch(() => {});
   }
 
 
@@ -1688,8 +2020,7 @@ async function main() {
     }
     liveEmit.phase('understand', '① 读需求/缺陷', `${req.id} · ${req.title}`, 'done');
 
-    const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
-    const rel = path.relative(gitRoot, repoDir);
+    const rel = await repoPrefixFromGit();
     const changedFiles = req.affectedModules.map((m) => path.join(rel, m));
     const impact = {
       changedFiles,
@@ -1701,7 +2032,7 @@ async function main() {
       testFiles: [],
       otherFiles: [],
     };
-    const sel = selectTests({ repoDir, gitRoot, changedFiles });
+    const sel = selectTests({ repoDir, changedFiles, repoRel: rel });
     impact.affectedTests = sel.testFiles.map((f) => path.relative(repoDir, f));
     impact.narrowed = sel.narrowed;
     impact.selectionReason = sel.reason;
@@ -1817,6 +2148,8 @@ async function main() {
     liveEmit.phase('report', '⑧ 生成可决策报告', `report/${outName}.html`);
     await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
     liveEmit.phase('report', '⑧ 生成可决策报告', `report/${outName}.html`, 'done');
+    // 企微真实推送闭环：与其余场景一致，配置 --webhook/WEBHOOK_URL 则真推，否则跳过
+    await pushToWeChat({ report, outName });
     console.log(`\n✅ 场景 B 完成：需求覆盖 ${covered} 项 / 缺口 ${gaps} 项 / AI 测试官发现 ${failingPts} 个不达标问题`);
     console.log(perf());
     liveEmit.done({ summary: report.summary, reportFile: `${outName}.html` });
@@ -1877,12 +2210,11 @@ async function main() {
     liveEmit.phase('understand', '① 理解缺陷 & 修复改动', `缺陷 ${req.id} · ${impact.changedFiles.length} 个文件改动`, 'done');
 
     // 3) 选测：改动文件 + 缺陷描述中涉及的功能模块（取并集）
-    const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
     // 把缺陷涉及的模块也加入 changedFiles，保证即使没直接改到的相关模块也会被测
     const bugModules = req.affectedModules || [];
-    const rel = path.relative(gitRoot, repoDir);
+    const rel = await repoPrefixFromGit();
     const allChanged = [...new Set([...impact.changedFiles, ...bugModules.map((m) => path.join(rel, m))])];
-    const sel = selectTests({ repoDir, gitRoot, changedFiles: allChanged });
+    const sel = selectTests({ repoDir, changedFiles: allChanged, repoRel: rel });
     impact.affectedTests = sel.testFiles.map((f) => path.relative(repoDir, f));
     impact.narrowed = sel.narrowed;
     impact.selectionReason = sel.reason + (bugModules.length ? ` + 缺陷关联模块 ${bugModules.length} 个` : '');
@@ -1977,7 +2309,7 @@ async function main() {
     liveEmit.phase('report', '⑥ 生成可决策报告', `report/${outName}.html`);
     await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
     liveEmit.phase('report', '⑥ 生成可决策报告', `report/${outName}.html`, 'done');
-    await pushToWeChat({ report });
+    await pushToWeChat({ report, outName });
     const verdictText = fixVerdict.verdict === 'fixed' ? '✅ 修复通过，无回归' : `⚠️ ${fixVerdict.verdict}：${fixVerdict.reason}`;
     console.log(`\n🔧 场景 D 完成：${verdictText}`);
     console.log(perf());
@@ -1998,19 +2330,17 @@ async function main() {
     console.log(`📋 全量测试集：${allTests.length} 个测试文件`);
     console.log(`   ▶ 分支 ${target} 独立跑测…`);
     liveEmit({ type: 'log', phase: 'understand', detail: `▶ 分支 ${target} 独立跑测（${allTests.length} 个文件）` });
-    const runA = await runInWorktree(target, allTests);
+    const runA = await runInWorktree(target, allTests, { reglob: true });
     const resultsA = [...runA.unit, ...runA.api, ...runA.ui];
     const summaryA = summarize(resultsA);
-    const passA = new Set(resultsA.filter((r) => r.status === 'pass').map((r) => r.name));
     const failA = resultsA.filter((r) => r.status === 'fail');
     console.log(`      ${target}：通过 ${summaryA.pass} / 失败 ${summaryA.fail} / 总 ${summaryA.total}`);
 
     console.log(`   ▶ 分支 ${mergeBranch} 独立跑测…`);
     liveEmit({ type: 'log', phase: 'understand', detail: `▶ 分支 ${mergeBranch} 独立跑测（${allTests.length} 个文件）` });
-    const runB = await runInWorktree(mergeBranch, allTests);
+    const runB = await runInWorktree(mergeBranch, allTests, { reglob: true });
     const resultsB = [...runB.unit, ...runB.api, ...runB.ui];
     const summaryB = summarize(resultsB);
-    const passB = new Set(resultsB.filter((r) => r.status === 'pass').map((r) => r.name));
     const failB = resultsB.filter((r) => r.status === 'fail');
     const branchFailCount = failA.length + failB.length;
     console.log(`      ${mergeBranch}：通过 ${summaryB.pass} / 失败 ${summaryB.fail} / 总 ${summaryB.total}`);
@@ -2024,7 +2354,7 @@ async function main() {
     // 2) 临时 merge 并跑测
     liveEmit.phase('execute', '② 模拟合并 & 全量跑测', `git merge ${target} + ${mergeBranch} → 跑全量…`);
     console.log('🔀 模拟合并两个分支并跑全量…');
-    const { results: resultsMerge, mergeDiff } = await runMergeTest({
+    const { results: resultsMerge, mergeDiff, diffA: diffACaptured, diffB: diffBCaptured } = await runMergeTest({
       baseRef: base, targetRef: target, mergeRef: mergeBranch, testFiles: allTests,
     });
     const failMerge = resultsMerge.filter((r) => r.status === 'fail');
@@ -2035,10 +2365,14 @@ async function main() {
     liveEmit.phase('execute', '② 模拟合并 & 全量跑测', `通过 ${passMerge.size} / 失败 ${failMerge.length}`, mergeBlockedByTextConflict || failMerge.length ? 'warn' : 'done');
 
     // 3) 对比：找出语义冲突。若 git 已经文本冲突，则先报告文本冲突，不能误判为“合并安全”。
-    // 语义冲突 = 在 A 通过 且 在 B 通过，但 merge 后失败。
-    const semanticConflicts = mergeBlockedByTextConflict ? [] : failMerge.filter((r) => passA.has(r.name) && passB.has(r.name));
+    // 语义冲突 = 合并后新出现的失败：在 A、B 各自全量基线中都没有失败（含该用例在此分支不存在的情况），合并后却失败。
+    // 用「失败集差」而非「通过集交」判定：分支特有的新用例只存在于本分支，自然不在另一分支的通过集里；
+    // 若按通过集交集判定，"另一分支的改动破坏了本分支新用例"这类最典型的语义冲突会被误判为已知失败。
+    const failNamesA = new Set(failA.map((r) => r.name));
+    const failNamesB = new Set(failB.map((r) => r.name));
+    const semanticConflicts = mergeBlockedByTextConflict ? [] : failMerge.filter((r) => !failNamesA.has(r.name) && !failNamesB.has(r.name));
     // 纯回归失败 = 在 A 或 B 已失败，merge 后继续失败（不是语义冲突，是已知问题）。
-    const preExistingFail = mergeBlockedByTextConflict ? [] : failMerge.filter((r) => !passA.has(r.name) || !passB.has(r.name));
+    const preExistingFail = mergeBlockedByTextConflict ? [] : failMerge.filter((r) => failNamesA.has(r.name) || failNamesB.has(r.name));
 
     console.log(`\n🔍 合并冲突检测结果：`);
     if (mergeBlockedByTextConflict) {
@@ -2069,15 +2403,52 @@ async function main() {
         : (branchFailCount ? `⚠️ 分支自身失败 ${branchFailCount} 个` : '✅ 无语义冲突'));
     liveEmit.phase('conflict', '③ 冲突检测', conflictDetail, conflictStatus);
 
-    // 4) AI 解释语义冲突
+    // 4) AI 解释冲突
     let conflictAnalysis = null;
-    if (mergeBlockedByTextConflict) {
+    if (mergeBlockedByTextConflict && isLLMEnabled()) {
+      // Git 文本冲突同样值得让 LLM 解释：两个分支各自改了什么、为什么会在同一处冲突、合并为何不安全。
+      // 文本冲突由 git 检出（确定性事实），LLM 只负责"人话解释根因"，不改变"合并不安全"的结论。
+      liveEmit.phase('rootcause', '④ AI 文本冲突根因分析', `分析 ${textConflicts.length} 个 Git 文本冲突…`);
+      try {
+        // 优先用 runMergeTest 在 worktree 存活期预捕获的 diff；为空才回退到现取（沙箱晚期 spawn git 曾 ENOENT）
+        const diffA = diffACaptured || await git(repoDir, 'diff', `${base}..${target}`, '--', '.');
+        const diffB = diffBCaptured || await git(repoDir, 'diff', `${base}..${mergeBranch}`, '--', '.');
+        // 从 git 合并输出里提取冲突文件（通用：匹配 "Merge conflict in <file>"），供模型聚焦。
+        const gitConflictText = textConflicts.map((r) => `- ${r.name}：${String(r.rootCause || '').slice(0, 300)}`).join('\n');
+        const conflictFiles = [...new Set(
+          textConflicts.flatMap((r) => [...String(r.rootCause || '').matchAll(/Merge conflict in (.+)/g)].map((m) => m[1].trim()))
+        )];
+        const { content, reasoning } = await chat({
+          messages: [{
+            role: 'system',
+            content: `你是「AI 测试官」的合并冲突分析 Agent。两个分支合并时 Git 检测到【文本冲突】（同一处代码被双方改动，无法自动合并）。
+请基于两个分支各自相对 base 的 diff，分析：每个分支分别改了什么、为什么会在同一处产生冲突、合并为何不安全、以及建议如何解决。
+只输出一个 JSON（不要任何额外文字或代码围栏）：
+{"summary":"一句话总结为什么合并不安全","conflicts":[{"file":"冲突文件","branchAChange":"分支A在此处改了什么","branchBChange":"分支B在此处改了什么","whyConflict":"为什么会文本冲突/合并不安全","resolution":"建议如何解决"}]}`,
+          }, {
+            role: 'user',
+            content: `分支 A = ${target}，分支 B = ${mergeBranch}\n冲突文件：${conflictFiles.join('、') || '（见下方 git 输出）'}\n\n分支 A 的 diff（${base}..${target}）：\n${String(diffA).slice(0, 2500)}\n\n分支 B 的 diff（${base}..${mergeBranch}）：\n${String(diffB).slice(0, 2500)}\n\nGit 文本冲突详情：\n${gitConflictText}`,
+          }],
+          temperature: 0.1, maxTokens: 1200, timeoutMs: 25000, model: fastModel(),
+        });
+        const j = extractJSON(content) || extractJSON(reasoning);
+        conflictAnalysis = (j && j.summary)
+          ? { summary: `Git 文本冲突（${textConflicts.length} 个）：${j.summary}`, conflicts: Array.isArray(j.conflicts) ? j.conflicts : [] }
+          : { summary: `Git 文本冲突阻塞合并（${textConflicts.length} 个），需先人工解决冲突后再运行语义冲突检测`, conflicts: [] };
+        console.log(`   🤖 AI 文本冲突分析：${conflictAnalysis.summary}`);
+      } catch (e) {
+        console.warn('⚠️ AI 文本冲突分析失败，回退确定性结论：', e.message);
+        conflictAnalysis = { summary: `Git 文本冲突阻塞合并（${textConflicts.length} 个），需先人工解决冲突后再运行语义冲突检测`, conflicts: [] };
+      }
+      liveEmit.phase('rootcause', '④ AI 文本冲突根因分析', conflictAnalysis?.summary || '完成', 'done');
+    } else if (mergeBlockedByTextConflict) {
       conflictAnalysis = { summary: `Git 文本冲突阻塞合并（${textConflicts.length} 个），需先人工解决冲突后再运行语义冲突检测`, conflicts: [] };
     } else if (semanticConflicts.length && isLLMEnabled()) {
       liveEmit.phase('rootcause', '④ AI 冲突根因分析', `分析 ${semanticConflicts.length} 个语义冲突…`);
       try {
-        const diffA = await git(repoDir, 'diff', `${base}..${target}`, '--', '.');
-        const diffB = await git(repoDir, 'diff', `${base}..${mergeBranch}`, '--', '.');
+        // 优先用 runMergeTest 在 worktree 存活期预捕获的 diff；为空才回退到现取（沙箱晚期 spawn git 曾 ENOENT）
+        const diffA = diffACaptured || await git(repoDir, 'diff', `${base}..${target}`, '--', '.');
+        const diffB = diffBCaptured || await git(repoDir, 'diff', `${base}..${mergeBranch}`, '--', '.');
         const conflictDetailText = semanticConflicts.map((r) => `- ${r.name}：${r.rootCause || '根因未知'}`).join('\n');
         const { content } = await chat({
           messages: [{
@@ -2094,12 +2465,44 @@ async function main() {
         conflictAnalysis = extractJSON(content) || { summary: `检测到 ${semanticConflicts.length} 个语义冲突（AI 分析未产出结构化结果）`, conflicts: [] };
         console.log(`   🤖 AI 冲突分析：${conflictAnalysis.summary || '（无总结）'}`);
       } catch (e) {
-        console.warn('⚠️ AI 冲突分析失败：', e.message);
+        // 诊断信息：下次再失败时能区分是 repoDir 被清理还是 PATH/环境问题
+        let diag = '';
+        try { diag = ` [diag: repoDir存在=${fs.existsSync(repoDir)} git可用=${fs.existsSync('/usr/bin/git') || fs.existsSync('/usr/local/bin/git')} PATH=${String(process.env.PATH || '').slice(0, 120)}]`; } catch { /* ignore */ }
+        console.warn('⚠️ AI 冲突分析失败：', e.message + diag);
         conflictAnalysis = { summary: `检测到 ${semanticConflicts.length} 个语义冲突（AI 分析不可用）`, conflicts: [] };
       }
       liveEmit.phase('rootcause', '④ AI 冲突根因分析', conflictAnalysis?.summary || '完成', 'done');
     } else if (semanticConflicts.length) {
       conflictAnalysis = { summary: `检测到 ${semanticConflicts.length} 个语义冲突（未启用 LLM，无法自动分析根因）`, conflicts: [] };
+    } else if (branchFailCount > 0 && isLLMEnabled()) {
+      // 轻量增强：无语义冲突，但分支自身跑测未全绿——用 1 次快模型给一句「为何暂不能合并」研判。
+      // 这是合并前的"放行/拦截"决策辅助，仅在该条件下触发；失败/未启用则回退确定性文案。
+      liveEmit.phase('rootcause', '④ AI 合并研判', `分支自身存在 ${branchFailCount} 个失败，研判是否可合并…`);
+      try {
+        const branchFailText = [...failA, ...failB]
+          .slice(0, 12)
+          .map((r) => `- ${r.name}：${String(r.rootCause || '').slice(0, 120)}`)
+          .join('\n') || '(分支各自跑测存在失败，详见报告)';
+        const { content, reasoning } = await chat({
+          messages: [{
+            role: 'system',
+            content: '你是「AI 测试官」的合并放行研判助手。两个待合并分支各自跑测未全绿（存在失败），虽无"合并后新增"的语义冲突，但分支自身问题未清。请输出中文 JSON：{"summary":"一句话研判为何暂不能合并/需先做什么","risk":"high|medium|low"}。只输出 JSON。',
+          }, {
+            role: 'user',
+            content: `分支 ${target} 与 ${mergeBranch} 各自独立跑测共 ${branchFailCount} 个失败：\n${branchFailText}`,
+          }],
+          temperature: 0.2, maxTokens: 700, timeoutMs: 40000, retryOnEmpty: false, model: fastModel(),
+        });
+        const j = extractJSON(content) || extractJSON(reasoning);
+        conflictAnalysis = j && j.summary
+          ? { summary: j.summary + (j.risk ? `（风险 ${j.risk}）` : ''), conflicts: [] }
+          : { summary: `分支自身存在 ${branchFailCount} 个失败，需先修复后再合并`, conflicts: [] };
+        console.log(`   🤖 AI 合并研判：${conflictAnalysis.summary}`);
+      } catch (e) {
+        console.warn('⚠️ AI 合并研判失败：', e.message);
+        conflictAnalysis = { summary: `分支自身存在 ${branchFailCount} 个失败，需先修复后再合并`, conflicts: [] };
+      }
+      liveEmit.phase('rootcause', '④ AI 合并研判', conflictAnalysis?.summary || '完成', 'done');
     }
 
     // 5) 生成报告
@@ -2146,7 +2549,7 @@ async function main() {
     liveEmit.phase('report', '⑥ 生成可决策报告', `report/${outName}.html`);
     await run(ROOT, 'node', ['report/generate-report.mjs', reportJsonPath]);
     liveEmit.phase('report', '⑥ 生成可决策报告', `report/${outName}.html`, 'done');
-    await pushToWeChat({ report });
+    await pushToWeChat({ report, outName });
     const summaryText = mergeBlockedByTextConflict
       ? `\n🚫 场景 E 完成：Git 文本冲突 ${textConflicts.length} 个，${target} 与 ${mergeBranch} 暂不能合并`
       : (semanticConflicts.length
@@ -2205,8 +2608,8 @@ async function main() {
   liveEmit.phase('understand', '① 理解变更', impact.scope, 'done');
 
   // 通用精准选测：导入图反向可达 + 同名兜底（不依赖业务语义）
-  const gitRoot = (await git(repoDir, 'rev-parse', '--show-toplevel')).trim();
-  const sel = selectTests({ repoDir, gitRoot, changedFiles: impact.changedFiles });
+  const repoRel = await repoPrefixFromGit();
+  const sel = selectTests({ repoDir, changedFiles: impact.changedFiles, repoRel });
   impact.affectedTests = sel.testFiles.map((f) => path.relative(repoDir, f));
   impact.narrowed = sel.narrowed;
   impact.selectionReason = sel.reason;
@@ -2216,17 +2619,28 @@ async function main() {
   // ---------- ReAct 整体规划（问题3）：Agent 自主观察 diff/测试集，规划"测什么/顺序/是否含 UI"，与结构选测取并集 ----------
   // ReAct 循环的每一步（Think 推理 / Act 调用工具 / Observe 结果）实时写入事件流，
   // 供 report/live.html 看板逐步展示，而不是等 Agent 跑完才一次性看到最终结论。
-  liveEmit.phase('react', '③ ReAct 规划', 'Agent 自主观察 diff/测试集，规划测试策略…');
-  const officerCtxPlan = buildOfficerCtx({ repoDir, diffText, lastUnitRaw: '', sel });
-  const reactPlan = await planWithReActAgent({
-    repoDir, diffText, impact, sel, officerCtx: officerCtxPlan,
-    onLiveStep: (s) => {
-      if (s.type === 'reason') liveEmit({ type: 'log', phase: 'react', kind: 'think', detail: '🧠 ' + String(s.text).slice(0, 200) });
-      else if (s.type === 'action') liveEmit({ type: 'log', phase: 'react', kind: 'act', detail: `🛠 调用 ${s.tool}(${JSON.stringify(s.args || {})})` });
-      else if (s.type === 'answer') liveEmit({ type: 'log', phase: 'react', kind: 'answer', detail: '✅ ' + String(s.text).slice(0, 200) });
-    },
-  });
-  liveEmit.phase('react', '③ ReAct 规划', reactPlan ? `核心风险：${reactPlan.focus || '—'}` : '未启用 / 跳过', 'done');
+  // ReAct 规划（多轮 Agent 调用）默认关闭：它只在结构选测基础上「做加法」，性价比低、耗时高（约 45s）。
+  // 仅 ENABLE_REACT=1 时启用，并设整体截止时间（默认 45s，REACT_BUDGET_MS 可调）超时回退结构选测。
+  let reactPlan = null;
+  if (ENABLE_REACT) {
+    liveEmit.phase('react', '③ ReAct 规划', 'Agent 自主观察 diff/测试集，规划测试策略…');
+    const officerCtxPlan = buildOfficerCtx({ repoDir, diffText, lastUnitRaw: '', sel });
+    const reactBudgetMs = Number(process.env.REACT_BUDGET_MS || 45000);
+    reactPlan = await Promise.race([
+      planWithReActAgent({
+        repoDir, diffText, impact, sel, officerCtx: officerCtxPlan,
+        onLiveStep: (s) => {
+          if (s.type === 'reason') liveEmit({ type: 'log', phase: 'react', kind: 'think', detail: '🧠 ' + String(s.text).slice(0, 200) });
+          else if (s.type === 'action') liveEmit({ type: 'log', phase: 'react', kind: 'act', detail: `🛠 调用 ${s.tool}(${JSON.stringify(s.args || {})})` });
+          else if (s.type === 'answer') liveEmit({ type: 'log', phase: 'react', kind: 'answer', detail: '✅ ' + String(s.text).slice(0, 200) });
+        },
+      }).catch(() => null),
+      new Promise((r) => setTimeout(() => r(null), reactBudgetMs)),
+    ]);
+    liveEmit.phase('react', '③ ReAct 规划', reactPlan ? `核心风险：${reactPlan.focus || '—'}` : '超时跳过（用结构选测）', 'done');
+  } else {
+    liveEmit.phase('react', '③ ReAct 规划', 'FAST_MODE / 默认关闭：用确定性结构选测（导入图）', 'done');
+  }
   let runTests = sel.testFiles;
   if (reactPlan) {
     runTests = reactPlan._mergedTests && reactPlan._mergedTests.length ? reactPlan._mergedTests : sel.testFiles;
@@ -2254,8 +2668,17 @@ async function main() {
   const { unit, api, ui } = run1;
   const results = [...unit, ...api, ...ui];
   liveEmit.phase('execute', '④ 执行验证', `完成：通过 ${results.filter((r) => r.status === 'pass').length} / 失败 ${results.filter((r) => r.status === 'fail').length}`, 'done');
-  // 语义理解（已与跑测并行）此刻应已完成，补打展示
-  impact.llmUnderstand = await semanticP;
+  // 语义理解（已与跑测并行）：它只是报告里的可读性描述，不影响任何结论。
+  // 此处不无限等待，但要给足真实推理调用的时间——推理型模型（CoT）单次常需 8~20s，
+  // 慢网关下更久；且 semanticAnalyze 内部含「首轮 + 一次 JSON 重整」两段调用。
+  // 3 秒硬超时会让语义理解在任何真实端点下都竞速失败。默认放宽到 45s（覆盖首轮 20s 超时
+  // + 重整 20s + 少量裕量），可用 LLM_UNDERSTAND_WAIT_MS 覆盖；
+  // 拿到即立即返回不会空等，离线（LLM_OFF/未配 Key）时该 promise 立即 resolve(null) 不受影响。
+  const understandWaitMs = Number(process.env.LLM_UNDERSTAND_WAIT_MS || 45000);
+  impact.llmUnderstand = await Promise.race([
+    semanticP,
+    new Promise((r) => setTimeout(() => r(null), understandWaitMs)),
+  ]);
   if (impact.llmUnderstand) {
     console.log(`   🤖 AI 语义理解：意图=${impact.llmUnderstand.intent} ｜ 风险=${impact.llmUnderstand.riskLevel}`);
     console.log(`      影响流程：${(impact.llmUnderstand.businessFlows || []).join('、') || '（未指明）'}`);
@@ -2358,10 +2781,10 @@ async function main() {
   liveEmit.phase('report', '⑧ 生成可决策报告', `report/${outName}.html`, 'done');
 
   // ---------- PR/MR 自动回写闭环（问题2）：跑完 → 在工蜂 MR 下评论测试结果（有凭据则真写，否则 dry-run）----------
-  await commentToPR({ report });
+  await commentToPR({ report, outName });
 
   // ---------- 企微真实推送闭环：跑完 → 实时推送给值班/开发（配置 --webhook/WEBHOOK_URL 则真推，否则跳过）----------
-  await pushToWeChat({ report });
+  await pushToWeChat({ report, outName });
 
 
   console.log(

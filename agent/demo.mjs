@@ -53,25 +53,55 @@ function scenarioCard(title, sub, base, report) {
   </a>`;
 }
 
+// 执行调度：默认串行（并发 1）。
+// 说明：LLM 端点有 RPM 限流（实测 60 RPM），而每个场景本身就有 6+ 次 LLM 调用，
+//   并行多场景会瞬间超限触发 429，反而因退避重试大幅变慢——故默认串行最稳。
+//   仅在「离线模式（未配 LLM Key）」或明确知道端点无限流时，才值得用 DEMO_CONCURRENCY>1 提速。
+async function runPool(jobs, concurrency) {
+  const results = new Array(jobs.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < jobs.length) {
+      const i = cursor++;
+      const job = jobs[i];
+      console.log(`▶ ${job.label}`);
+      results[i] = await runNode(job.args);
+      console.log(`✓ ${job.label} 完成（exit ${results[i]}）`);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, worker));
+  return results;
+}
+
 async function main() {
   console.log('\n========== AI 测试官 · 离线五场景一键 Demo ==========\n');
+  const concurrency = Number(process.env.DEMO_CONCURRENCY || 1);
+  console.log(`（并发度 ${concurrency}；默认串行避免 LLM 限流，离线模式可设 DEMO_CONCURRENCY=3 提速）\n`);
 
-  console.log('▶ 场景 A：代码改动 → 针对性测试（feature/coupon-bug）');
-  await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'feature/coupon-bug', '--scenario', 'A', '--out', 'report-A', '--triggeredBy', 'Demo · 场景A 代码改动']);
+  // 六个场景任务（互相独立，各写各的 report-*.json）
+  // 沙箱 clone 后 sample-app 在 case1/ 下；本地兼容两个目录名
+  const localRepo = (() => {
+    const root = path.join(__dirname, '..');
+    for (const d of ['case1', 'sample-app']) { try { if (fs.statSync(path.join(root, d)).isDirectory()) return d; } catch { /* 不存在 */ } }
+    return 'case1';
+  })();
+  const jobs = [
+    { label: '场景 A：代码改动 → 针对性测试（feature/coupon-bug）',
+      args: ['agent/run-test-officer.mjs', '--repo', localRepo, '--base', 'main', '--target', 'feature/coupon-bug', '--scenario', 'A', '--out', 'report-A', '--triggeredBy', 'Demo · 场景A 代码改动'] },
+    { label: '场景 B：需求文档 → 覆盖度报告',
+      args: ['agent/run-test-officer.mjs', '--repo', localRepo, '--base', 'main', '--target', 'main', '--scenario', 'B', '--requirement', `${localRepo}/docs/requirement.md`, '--out', 'report-B', '--triggeredBy', 'Demo · 场景B 需求驱动'] },
+    { label: '场景 C：定时巡检（健康基线 @main）',
+      args: ['agent/cron-monitor.mjs', '--branch', 'main', '--out', 'report-C-healthy', '--triggeredBy', 'Demo · 场景C 巡检'] },
+    { label: '场景 C：定时巡检（异常告警 @feature/coupon-bug）',
+      args: ['agent/cron-monitor.mjs', '--branch', 'feature/coupon-bug', '--out', 'report-C-alert', '--triggeredBy', 'Demo · 场景C 巡检'] },
+    { label: '场景 D：Bug 修复闭环验证（feature/coupon-bug → main）',
+      args: ['agent/run-test-officer.mjs', '--repo', localRepo, '--base', 'feature/coupon-bug', '--target', 'main', '--scenario', 'D', '--requirement', `${localRepo}/docs/requirement.md`, '--out', 'report-D', '--triggeredBy', 'Demo · 场景D 修复验证'] },
+    { label: '场景 E：合并冲突检测（refund-guard + floor-guard）',
+      args: ['agent/run-test-officer.mjs', '--repo', localRepo, '--base', 'main', '--target', 'feature/coupon-refund-guard', '--merge', 'feature/coupon-floor-guard', '--scenario', 'E', '--out', 'report-E', '--triggeredBy', 'Demo · 场景E 合并冲突检测'] },
+  ];
+  await runPool(jobs, concurrency);
+  console.log('\n所有场景执行完毕，生成聚合总览页…\n');
 
-  console.log('\n▶ 场景 B：需求文档（Markdown requirement.md）→ 覆盖度报告');
-  await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'main', '--scenario', 'B', '--requirement', 'sample-app/docs/requirement.md', '--out', 'report-B', '--triggeredBy', 'Demo · 场景B 需求驱动']);
-
-  console.log('\n▶ 场景 C：定时巡检（健康基线 @main）');
-  await runNode(['agent/cron-monitor.mjs', '--branch', 'main', '--out', 'report-C-healthy', '--triggeredBy', 'Demo · 场景C 巡检']);
-  console.log('\n▶ 场景 C：定时巡检（异常告警 @feature/coupon-bug）');
-  await runNode(['agent/cron-monitor.mjs', '--branch', 'feature/coupon-bug', '--out', 'report-C-alert', '--triggeredBy', 'Demo · 场景C 巡检']);
-
-  console.log('\n▶ 场景 D：Bug 修复闭环验证（feature/coupon-bug → main）');
-  await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'feature/coupon-bug', '--target', 'main', '--scenario', 'D', '--requirement', 'sample-app/docs/requirement.md', '--out', 'report-D', '--triggeredBy', 'Demo · 场景D 修复验证']);
-
-  console.log('\n▶ 场景 E：合并冲突检测（refund-guard + floor-guard）');
-  await runNode(['agent/run-test-officer.mjs', '--repo', 'sample-app', '--base', 'main', '--target', 'feature/coupon-refund-guard', '--merge', 'feature/coupon-floor-guard', '--scenario', 'E', '--out', 'report-E', '--triggeredBy', 'Demo · 场景E 合并冲突检测']);
 
   // 聚合总览页
   const a = readReport('report-A');

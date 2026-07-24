@@ -37,13 +37,14 @@ const coverage = data.coverage || [];
 const generatedTests = data.generatedTests || [];
 const aiSuggestedPoints = data.aiSuggestedPoints || [];
 const branchFailures = data.branchFailures || [];
+const conflictAnalysis = data.conflictAnalysis || null;
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-const sevColor = { high: '#ff6b81', medium: '#ffb86b', low: '#3ddc97' };
+const sevColor = { high: '#d6455a', medium: '#b87708', low: '#0e9f6e' };
 const statusBadge = { pass: '✅ PASS', fail: '❌ FAIL', skip: '⏭ SKIP' };
 const statusClass = { pass: 'ok', fail: 'err', skip: 'muted' };
 const passPct = summary.total ? Math.round((summary.pass / summary.total) * 100) : 0;
-const ringColor = (summary.fail || 0) > 0 ? '#ff6b81' : '#3ddc97';
+const ringColor = (summary.fail || 0) > 0 ? '#d6455a' : '#0e9f6e';
 
 // ---------- 结论横幅：消除"通过/失败"数字的歧义 ----------
 // 背景：单纯展示「12 通过 / 8 失败」容易被误读为"AI 测试官只做对了 12 件事、搞砸了 8 件"，
@@ -69,7 +70,7 @@ const renderResults = results.map((r) => `
     <td>${esc(r.name)}</td>
     <td><span class="tag tag-type">${esc(r.type)}</span></td>
     <td><span class="badge badge-${statusClass[r.status] || 'muted'}">${statusBadge[r.status] || esc(r.status)}</span></td>
-    <td><span class="sev" style="color:${sevColor[r.severity] || '#8993b8'}">${esc(r.severity) || '-'}</span></td>
+    <td><span class="sev" style="color:${sevColor[r.severity] || '#8b96b3'}">${esc(r.severity) || '-'}</span></td>
     <td class="rootcause">${esc(r.rootCause) || '-'}</td>
     <td><code>${esc(r.repro) || '-'}</code></td>
   </tr>`).join('');
@@ -142,6 +143,7 @@ const navItems = [
   aiSuggestedPoints.length ? { id: 'sec-suggested', label: 'AI 补充建议' } : null,
   reactPlan ? { id: 'sec-react', label: 'ReAct 规划' } : null,
   branchFailures.length ? { id: 'sec-branch-failures', label: '分支失败' } : null,
+  conflictAnalysis ? { id: 'sec-conflict-ai', label: '合并冲突分析' } : null,
   { id: 'sec-plan', label: '测试策略' },
   { id: 'sec-results', label: '执行结果' },
   { id: 'sec-blocking', label: '决策项' },
@@ -154,16 +156,16 @@ const html = `<!DOCTYPE html>
 <title>${esc(meta.title || 'AI 测试官报告')}</title>
 <style>
   :root{
-    --bg:#0b0e17;--panel:#12172a;--panel2:#161c33;--line:#232a45;--txt:#e7eaf6;--sub:#8993b8;
-    --accent:#6d8dff;--accent2:#9b7dff;--ok:#3ddc97;--warn:#ffb86b;--err:#ff6b81;
+    --bg:#f5f6fa;--panel:#ffffff;--panel2:#f7f8fc;--line:#e3e7f2;--txt:#182238;--sub:#5c6b8c;--dim:#8b96b3;
+    --accent:#4f6ef7;--accent-d:#3a58d6;--accent2:#7a5af5;--ok:#0e9f6e;--warn:#b87708;--err:#d6455a;
   }
   *{box-sizing:border-box}
-  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;background:radial-gradient(1200px 620px at 15% -10%,#1a2148 0%,var(--bg) 55%);color:var(--txt);min-height:100vh;line-height:1.5}
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;background:linear-gradient(180deg,#f8f9fd 0%,var(--bg) 60%);color:var(--txt);min-height:100vh;line-height:1.5}
   a{color:var(--accent);text-decoration:none}
   a:hover{text-decoration:underline}
-  header{padding:26px 32px 22px;border-bottom:1px solid var(--line);background:rgba(18,23,42,.55);backdrop-filter:blur(6px);position:sticky;top:0;z-index:10}
+  header{padding:24px 32px 20px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.85);backdrop-filter:blur(8px);position:sticky;top:0;z-index:10}
   header .htop{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
-  header h1{margin:0;font-size:21px;font-weight:800;letter-spacing:.2px;background:linear-gradient(135deg,#c9d4ff,#e8d9ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+  header h1{margin:0;font-size:21px;font-weight:800;letter-spacing:.2px;color:var(--txt)}
   .metachips{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
   .chip{font-size:12px;padding:4px 11px;border-radius:20px;background:var(--panel2);border:1px solid var(--line);color:var(--sub)}
   .chip b{color:var(--txt);font-weight:600}
@@ -171,19 +173,19 @@ const html = `<!DOCTYPE html>
   nav.quicknav a{color:var(--sub);padding:2px 0;border-bottom:2px solid transparent}
   nav.quicknav a:hover{color:var(--accent);border-color:var(--accent);text-decoration:none}
   main{max-width:1120px;margin:0 auto;padding:28px 32px 70px;display:grid;gap:20px}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;box-shadow:0 1px 0 rgba(255,255,255,.02) inset}
-  .card h2{margin:0 0 16px;font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:8px;color:#f1f3ff}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;box-shadow:0 1px 2px rgba(24,34,56,.04),0 8px 24px rgba(24,34,56,.05)}
+  .card h2{margin:0 0 16px;font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:8px;color:var(--txt)}
   .card h2 .icon{font-size:16px}
   .card > p.hint{font-size:12px;color:var(--sub);margin:10px 0 0}
 
   /* 顶部统计 */
   .statsrow{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
-  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;text-align:center}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;text-align:center;box-shadow:0 1px 2px rgba(24,34,56,.04)}
   .stat b{display:block;font-size:28px;font-weight:800;margin-bottom:2px}
   .stat.total b{color:var(--txt)}.stat.pass b{color:var(--ok)}.stat.fail b{color:var(--err)}
   .stat span.label{font-size:12px;color:var(--sub)}
   .ringstat{display:flex;align-items:center;justify-content:center;gap:14px}
-  .ring{width:66px;height:66px;border-radius:50%;background:conic-gradient(${ringColor} calc(var(--pct) * 1%), var(--line) 0);display:flex;align-items:center;justify-content:center;position:relative;flex-shrink:0}
+  .ring{width:66px;height:66px;border-radius:50%;background:conic-gradient(${ringColor} calc(var(--pct) * 1%), #e6eaf4 0);display:flex;align-items:center;justify-content:center;position:relative;flex-shrink:0}
   .ring::before{content:'';position:absolute;inset:6px;border-radius:50%;background:var(--panel)}
   .ring b{position:relative;z-index:1;font-size:15px}
   .ringstat .rlabel{text-align:left;font-size:12px;color:var(--sub)}
@@ -195,9 +197,9 @@ const html = `<!DOCTYPE html>
   .step:last-child{padding-bottom:0}
   .step::before{content:'';position:absolute;left:12px;top:26px;bottom:0;width:2px;background:var(--line)}
   .step:last-child::before{display:none}
-  .node{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;z-index:1;border:2px solid var(--ok);background:rgba(61,220,151,.12);color:var(--ok)}
-  .step.warn .node{border-color:var(--warn);background:rgba(255,184,107,.12);color:var(--warn)}
-  .step .title{font-weight:700;font-size:13.5px;color:#f1f3ff}
+  .node{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;z-index:1;border:2px solid var(--ok);background:rgba(14,159,110,.10);color:var(--ok)}
+  .step.warn .node{border-color:var(--warn);background:rgba(184,119,8,.10);color:var(--warn)}
+  .step .title{font-weight:700;font-size:13.5px;color:var(--txt)}
   .step .detail{font-size:12.5px;color:var(--sub);margin-top:4px;word-break:break-word}
 
   /* details 折叠 */
@@ -210,24 +212,25 @@ const html = `<!DOCTYPE html>
   .tablewrap{overflow-x:auto;border-radius:10px;border:1px solid var(--line)}
   table{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
   th,td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
-  th{background:var(--panel2);color:var(--sub);font-weight:600;font-size:11.5px;letter-spacing:.3px;text-transform:uppercase;position:sticky;top:0}
+  th{background:var(--panel2);color:var(--sub);font-weight:600;font-size:11.5px;letter-spacing:.3px;position:sticky;top:0;white-space:nowrap}
   tbody tr{transition:background .12s}
-  tbody tr:hover{background:rgba(109,141,255,.06)}
+  tbody tr:hover{background:rgba(79,110,247,.05)}
   tbody tr:last-child td{border-bottom:none}
   .row-err{border-left:3px solid var(--err)}
   .row-warn{border-left:3px solid var(--warn)}
   .row-ok{border-left:3px solid var(--ok)}
-  .rootcause{max-width:360px;color:#c3cbef;font-size:12.5px}
-  code{background:#0d1120;padding:2px 7px;border-radius:5px;font-size:12px;color:#b9c3ff;border:1px solid var(--line)}
+  .rootcause{max-width:360px;color:#3a4a6b;font-size:13px;line-height:1.65}
+  .row-err .rootcause{color:#a32c3e}
+  code{background:#eef1f8;padding:2px 7px;border-radius:5px;font-size:12px;color:#3a4a6b;border:1px solid var(--line)}
 
   /* 徽章 */
   .badge{display:inline-flex;align-items:center;font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap}
-  .badge-ok{background:rgba(61,220,151,.15);color:var(--ok)}
-  .badge-err{background:rgba(255,107,129,.15);color:var(--err)}
-  .badge-warn{background:rgba(255,184,107,.15);color:var(--warn)}
-  .badge-accent{background:rgba(109,141,255,.15);color:var(--accent)}
+  .badge-ok{background:rgba(14,159,110,.12);color:var(--ok)}
+  .badge-err{background:rgba(214,69,90,.12);color:var(--err)}
+  .badge-warn{background:rgba(184,119,8,.12);color:var(--warn)}
+  .badge-accent{background:rgba(79,110,247,.12);color:var(--accent)}
   .badge-muted{background:var(--panel2);color:var(--sub)}
-  .sev{font-weight:700;font-size:12.5px}
+  .sev{font-weight:700;font-size:12.5px;white-space:nowrap}
   .muted-text{color:var(--sub)}
 
   /* 标签 chip */
@@ -237,41 +240,70 @@ const html = `<!DOCTYPE html>
   ul{margin:0;padding-left:0;list-style:none}
   ul li{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
   ul li:last-child{border-bottom:none}
-  ul li b{color:#f1f3ff;display:block;margin-bottom:2px}
+  ul li b{color:var(--txt);display:block;margin-bottom:2px}
   ul li .why{color:var(--sub);font-size:12.5px}
 
   /* ReAct 轨迹 */
   .reacttrace{margin-top:8px}
   .reacttrace summary{cursor:pointer;font-weight:600;font-size:13px;color:var(--accent)}
   .reacttrace ul{margin-top:10px;display:flex;flex-direction:column;gap:6px}
-  .reacttrace li{border-bottom:none;padding:8px 10px;background:#0d1120;border-radius:8px;font-size:12.5px;color:var(--sub)}
-  .reacttrace li.trace-think{border-left:3px solid var(--accent2);color:#c9baff}
-  .reacttrace li.trace-act{border-left:3px solid var(--accent);color:#b7c6ff}
-  .reacttrace li.trace-answer{border-left:3px solid var(--ok);color:#a9f2d2}
+  .reacttrace li{border-bottom:none;padding:8px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;font-size:12.5px;color:var(--sub)}
+  .reacttrace li.trace-think{border-left:3px solid var(--accent2);color:#5b4fc4}
+  .reacttrace li.trace-act{border-left:3px solid var(--accent);color:var(--accent-d)}
+  .reacttrace li.trace-answer{border-left:3px solid var(--ok);color:#0a7a55}
   .ticon{margin-right:4px}
-  .targs{color:#6b7399}
+  .targs{color:var(--dim)}
 
   .aireason{font-size:11.5px;color:var(--sub);margin-top:4px}
   .aigap{font-size:11.5px;color:var(--err);margin-top:2px}
+
+  /* AI 语义理解高亮区（比赛核心能力，突出展示） */
+  .aiunderstand{background:linear-gradient(135deg,rgba(79,110,247,.08),rgba(122,90,245,.05));border:1px solid rgba(79,110,247,.28);border-radius:12px;padding:14px 18px;margin-bottom:16px}
+  .aiheader{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:13px;font-weight:700;color:var(--accent-d)}
+  .aiicon{font-size:16px}
+  .aigrid{display:grid;gap:8px}
+  .airow{display:grid;grid-template-columns:80px 1fr;gap:10px;font-size:12.5px;line-height:1.6}
+  .ailabel{color:var(--sub);font-weight:600;flex-shrink:0}
+  .aival{color:var(--txt)}
+  .riskbadge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:800}
+  .risk-high{background:rgba(214,69,90,.14);color:var(--err)}
+  .risk-medium{background:rgba(184,119,8,.14);color:var(--warn)}
+  .risk-low{background:rgba(14,159,110,.14);color:var(--ok)}
+  .impactrow{display:flex;gap:12px;font-size:12.5px;margin-bottom:10px;align-items:flex-start}
+  .impactrow b{color:var(--sub);min-width:80px;flex-shrink:0;padding-top:2px}
+  .impactrow div{flex:1}
 
   .blockinglist li{color:var(--warn)}
   footer{max-width:1120px;margin:0 auto;padding:0 32px 40px;color:var(--sub);font-size:12px;text-align:center}
 
   /* 结论横幅：一句话消除"通过/失败"数字歧义 */
   .verdict{border-radius:14px;padding:18px 22px;display:flex;gap:16px;align-items:flex-start;border:1px solid var(--line)}
-  .verdict.bad{background:linear-gradient(135deg,rgba(255,107,129,.1),rgba(255,184,107,.06));border-color:rgba(255,107,129,.35)}
-  .verdict.good{background:linear-gradient(135deg,rgba(61,220,151,.1),rgba(109,141,255,.06));border-color:rgba(61,220,151,.35)}
+  .verdict.bad{background:linear-gradient(135deg,rgba(214,69,90,.08),rgba(184,119,8,.05));border-color:rgba(214,69,90,.35)}
+  .verdict.good{background:linear-gradient(135deg,rgba(14,159,110,.08),rgba(79,110,247,.05));border-color:rgba(14,159,110,.35)}
   .verdict .vicon{font-size:26px;line-height:1;flex-shrink:0;margin-top:1px}
-  .verdict .vtitle{font-size:16.5px;font-weight:800;color:#f1f3ff;margin-bottom:6px}
-  .verdict .vsub{font-size:13px;color:#c3cbef;line-height:1.8}
+  .verdict .vtitle{font-size:16.5px;font-weight:800;color:var(--txt);margin-bottom:6px}
+  .verdict .vsub{font-size:13px;color:#4a5878;line-height:1.8}
   .verdict .vsub b{color:var(--txt)}
-  .stat .sublabel{font-size:10.5px;color:var(--sub);opacity:.8;margin-top:2px;display:block}
+  .stat .sublabel{font-size:10.5px;color:var(--sub);opacity:.85;margin-top:2px;display:block}
 
-  @media (max-width:720px){ .statsrow{grid-template-columns:repeat(2,1fr)} }
+  /* 合并冲突分析卡片（场景 E 的 AI 根因） */
+  .conflictaia{background:linear-gradient(135deg,rgba(214,69,90,.06),rgba(184,119,8,.05));border:1px solid rgba(214,69,90,.25);border-radius:12px;padding:14px 18px;margin-bottom:14px}
+  .conflictaia .aiheader{color:#b03045}
+  .conflictitem{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:12.5px}
+  .conflictitem:last-child{margin-bottom:0}
+  .conflictitem .cfile{color:var(--accent);font-weight:600;font-family:monospace;margin-bottom:6px}
+  .conflictitem .crow{display:flex;gap:10px;margin-bottom:4px}
+  .conflictitem .clabel{color:var(--sub);min-width:70px;flex-shrink:0;font-weight:600}
+  .conflictitem .cval{flex:1;color:var(--txt);line-height:1.6}
+  .conflictitem .cval.warn{color:var(--warn)}
+  .conflictitem .cval.resolution{color:var(--accent2);font-style:italic}
+
+  @media (max-width:720px){ .statsrow{grid-template-columns:repeat(2,1fr)} .airow{grid-template-columns:1fr} .ailabel{padding-top:2px} }
+
 </style></head>
 <body>
 <header>
-  <div class="htop"><h1>🤖 ${esc(meta.title || 'AI 测试官报告')}</h1></div>
+  <div class="htop"><h1>${esc(meta.title || 'AI 测试官报告')}</h1></div>
   <div class="metachips">
     <span class="chip">仓库 <b>${esc(meta.repo || '-')}</b></span>
     <span class="chip">场景 <b>${esc(meta.scenario || '-')}</b></span>
@@ -307,11 +339,22 @@ const html = `<!DOCTYPE html>
 
   <div class="card" id="sec-impact">
     <h2><span class="icon">🔍</span>影响面分析</h2>
-    <div><b>改动文件：</b>${(impact.changedFiles || []).map((f) => `<span class="tag">${esc(f)}</span>`).join('') || '<span class="muted-text">-</span>'}</div>
-    <p style="margin:12px 0 0"><b>改动范围：</b>${esc(impact.scope) || '-'}</p>
-    ${impact.requirement ? `<p style="margin:8px 0 0"><b>需求来源：</b>${esc(impact.requirement.id)} · ${esc(impact.requirement.title)}<br><span class="tag">${esc(impact.requirement.source)}</span></p>` : ''}
-    <p style="margin:8px 0 0"><b>选测策略：</b>${impact.narrowed ? '🎯 精准选测' : '⚠️ 全量回退'} — ${esc(impact.selectionReason) || '-'}</p>
-    <p style="margin:8px 0 0"><b>关联测试文件：</b>${(impact.affectedTests || []).map((f) => `<span class="tag">${esc(f)}</span>`).join('') || '<span class="muted-text">-</span>'}</p>
+    ${impact.llmUnderstand ? `
+    <div class="aiunderstand">
+      <div class="aiheader"><span class="aiicon">🤖</span><b>AI 语义理解</b></div>
+      <div class="aigrid">
+        <div class="airow"><span class="ailabel">改动意图</span><span class="aival">${esc(impact.llmUnderstand.intent)}</span></div>
+        <div class="airow"><span class="ailabel">风险等级</span><span class="aival"><span class="riskbadge risk-${impact.llmUnderstand.riskLevel}">${impact.llmUnderstand.riskLevel}</span></span></div>
+        ${impact.llmUnderstand.businessFlows && impact.llmUnderstand.businessFlows.length ? `<div class="airow"><span class="ailabel">影响流程</span><span class="aival">${impact.llmUnderstand.businessFlows.map(esc).join('、')}</span></div>` : ''}
+        ${impact.llmUnderstand.recommendedFocus && impact.llmUnderstand.recommendedFocus.length ? `<div class="airow"><span class="ailabel">建议验证</span><span class="aival">${impact.llmUnderstand.recommendedFocus.map(esc).join('、')}</span></div>` : ''}
+        ${impact.llmUnderstand.reasoning ? `<div class="airow"><span class="ailabel">推理依据</span><span class="aival aireason">${esc(impact.llmUnderstand.reasoning)}</span></div>` : ''}
+      </div>
+    </div>` : ''}
+    <div class="impactrow"><b>改动文件</b><div>${(impact.changedFiles || []).map((f) => `<span class="tag">${esc(f)}</span>`).join('') || '<span class="muted-text">-</span>'}</div></div>
+    <div class="impactrow"><b>改动范围</b><div>${esc(impact.scope) || '-'}</div></div>
+    ${impact.requirement ? `<div class="impactrow"><b>需求来源</b><div>${esc(impact.requirement.id)} · ${esc(impact.requirement.title)} <span class="tag">${esc(impact.requirement.source)}</span></div></div>` : ''}
+    <div class="impactrow"><b>选测策略</b><div>${impact.narrowed ? '🎯 精准选测' : '⚠️ 全量回退'} — ${esc(impact.selectionReason) || '-'}</div></div>
+    <div class="impactrow"><b>关联测试</b><div>${(impact.affectedTests || []).map((f) => `<span class="tag">${esc(f)}</span>`).join('') || '<span class="muted-text">-</span>'}</div></div>
   </div>
 
   ${coverage.length ? `
@@ -359,6 +402,23 @@ const html = `<!DOCTYPE html>
     <tbody>${renderBranchFailures}</tbody></table></div>
     </details>
     <p class="hint">这些失败来自合并前的分支独立跑测，不属于 merge 后新增语义冲突，但会阻塞合并安全判定。</p>
+  </div>` : ''}
+
+  ${conflictAnalysis ? `
+  <div class="card" id="sec-conflict-ai">
+    <h2><span class="icon">🔀</span>合并冲突根因分析</h2>
+    <div class="conflictaia">
+      <div class="aiheader"><span class="aiicon">🤖</span><b>AI 冲突分析</b></div>
+      <div style="font-size:13px;color:#182238;line-height:1.75;margin-bottom:12px">${esc(conflictAnalysis.summary || '')}</div>
+      ${(conflictAnalysis.conflicts || []).map((c) => `
+      <div class="conflictitem">
+        ${c.file ? `<div class="cfile">${esc(c.file)}</div>` : ''}
+        ${c.branchAChange ? `<div class="crow"><span class="clabel">分支 A 改动</span><span class="cval">${esc(c.branchAChange)}</span></div>` : ''}
+        ${c.branchBChange ? `<div class="crow"><span class="clabel">分支 B 改动</span><span class="cval">${esc(c.branchBChange)}</span></div>` : ''}
+        ${c.whyConflict ? `<div class="crow"><span class="clabel">为什么冲突</span><span class="cval warn">${esc(c.whyConflict)}</span></div>` : ''}
+        ${c.resolution ? `<div class="crow"><span class="clabel">解决建议</span><span class="cval resolution">${esc(c.resolution)}</span></div>` : ''}
+      </div>`).join('')}
+    </div>
   </div>` : ''}
 
   <div class="card" id="sec-plan">

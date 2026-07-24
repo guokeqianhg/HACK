@@ -1,0 +1,13 @@
+{
+  "name": "ai-test-officer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI 测试官 · 自主全链路测试 Agent（理解变更 → 规划策略 → 执行验证 → 可决策报告）。前端为纯静态首页（web/），后端为 EdgeOne Makers Agent（agents/test-officer）。",
+  "scripts": {
+    "build": "node -e \"0\""
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

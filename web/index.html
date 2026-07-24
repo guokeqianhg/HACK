@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI 测试官 · 全链路自动化测试 Agent</title>
+<style>
+  :root {
+    --bg: #f5f6fa;
+    --panel: #ffffff;
+    --panel2: #fafbfd;
+    --line: #e3e7f2;
+    --line2: #c9d2e6;
+    --txt: #182238;
+    --sub: #5c6b8c;
+    --dim: #8b96b3;
+    --accent: #4f6ef7;
+    --accent-d: #3a58d6;
+    --accent-soft: rgba(79,110,247,.09);
+    --ok: #0e9f6e;
+    --ok-soft: rgba(14,159,110,.10);
+    --warn: #b87708;
+    --warn-soft: rgba(217,138,6,.09);
+    --bad: #d6455a;
+    --bad-soft: rgba(214,69,90,.09);
+    --shadow: 0 1px 2px rgba(24,34,56,.04), 0 10px 28px rgba(24,34,56,.07);
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    color: var(--txt); background: var(--bg); min-height: 100vh; line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 40px 22px 64px; }
+
+  /* ── 头部 ── */
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12px; font-weight: 600; letter-spacing: .4px;
+    color: var(--accent); background: var(--accent-soft);
+    border: 1px solid rgba(79,110,247,.22); border-radius: 999px; padding: 5px 13px;
+  }
+  .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+  h1 { font-size: 30px; margin: 14px 0 8px; font-weight: 800; letter-spacing: -.5px; line-height: 1.2; }
+  h1 .grad { color: var(--accent); }
+  .lead { color: var(--sub); font-size: 14px; line-height: 1.85; max-width: 840px; margin: 0; }
+  .lead b { color: var(--txt); }
+  .lead code { color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 1px 7px; font-size: 12.5px; }
+
+  /* ── 场景选择器（分段控件，无图标） ── */
+  .tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 28px 0 18px; }
+  .tab {
+    text-align: left; cursor: pointer; font-family: inherit;
+    border: 1px solid var(--line); background: var(--panel);
+    border-radius: 12px; padding: 13px 14px; transition: .18s ease;
+  }
+  .tab:hover { border-color: var(--line2); box-shadow: var(--shadow); transform: translateY(-1px); }
+  .tab.active {
+    border-color: var(--accent);
+    background: linear-gradient(180deg, rgba(79,110,247,.07), rgba(79,110,247,.02));
+    box-shadow: 0 0 0 1px var(--accent) inset, var(--shadow);
+  }
+  .tab .tabL {
+    display: inline-grid; place-items: center; width: 28px; height: 28px;
+    border-radius: 9px; font-size: 18px; font-weight: 800; line-height: 1;
+    color: #5c6b8c; background: #eef1f8; border: 1px solid #dde3f0;
+    margin-bottom: 8px;
+    transition: color .2s, background .2s, border-color .2s, box-shadow .2s;
+  }
+  .tab:hover .tabL { color: var(--accent); border-color: rgba(79,110,247,.45); }
+  .tab.active .tabL {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+    box-shadow: 0 4px 12px rgba(79,110,247,.35);
+    animation: badgePop .38s cubic-bezier(.34,1.56,.64,1) both;
+  }
+  @keyframes badgePop {
+    0% { transform: scale(.3) translateY(-7px); opacity: 0; }
+    100% { transform: scale(1) translateY(0); opacity: 1; }
+  }
+  .tab b { display: block; font-size: 13px; font-weight: 700; color: var(--txt); line-height: 1.4; }
+  .tab span { display: block; font-size: 11.5px; color: var(--sub); margin-top: 3px; line-height: 1.45; }
+
+  /* ── 卡片 ── */
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 22px 24px; box-shadow: var(--shadow);
+  }
+  .scDesc {
+    margin: 0 0 20px; padding: 14px 16px; border-radius: 12px;
+    background: var(--accent-soft); border: 1px solid rgba(79,110,247,.18);
+    border-left: 3px solid var(--accent);
+  }
+  .descCore { font-size: 14.5px; font-weight: 700; color: var(--txt); margin-bottom: 4px; }
+  .descText { font-size: 13px; color: var(--sub); line-height: 1.8; }
+
+  .field { margin-bottom: 16px; }
+  .field label { display: block; font-size: 12.5px; color: var(--sub); margin-bottom: 6px; font-weight: 600; }
+  .field input, .field textarea {
+    width: 100%; background: #fff; border: 1px solid var(--line2); border-radius: 10px;
+    color: var(--txt); padding: 11px 13px; font-size: 13.5px; font-family: inherit; outline: none; transition: .15s;
+  }
+  .field input::placeholder, .field textarea::placeholder { color: var(--dim); }
+  .field input:focus, .field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,110,247,.14); }
+  .field textarea { min-height: 150px; resize: vertical; font-family: ui-monospace, Menlo, Consolas, monospace; line-height: 1.65; font-size: 12.5px; }
+  .field .hint { font-size: 11.5px; color: var(--dim); margin-top: 6px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+
+  .actions { display: flex; gap: 12px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+  .run {
+    border: 0; border-radius: 10px; padding: 12px 26px; cursor: pointer; font-family: inherit;
+    background: var(--accent); color: #fff; font-size: 14px; font-weight: 700;
+    box-shadow: 0 4px 14px rgba(79,110,247,.28); transition: .16s;
+  }
+  .run:hover { background: var(--accent-d); transform: translateY(-1px); }
+  .run:active { transform: none; }
+  .run:disabled { opacity: .55; cursor: not-allowed; transform: none; box-shadow: none; }
+  .linkbtn {
+    background: #fff; border: 1px solid var(--line2); color: var(--accent); cursor: pointer;
+    font-size: 13px; padding: 11px 16px; border-radius: 10px; transition: .15s; font-weight: 600; font-family: inherit;
+  }
+  .linkbtn:hover { border-color: var(--accent); background: var(--accent-soft); }
+  .demoCaseWrap { display: inline-flex; align-items: center; gap: 8px; color: var(--sub); font-size: 12.5px; font-weight: 500; }
+  .demoCasePick {
+    appearance: none; background: #fff; border: 1px solid var(--line2); border-radius: 10px;
+    color: var(--txt); padding: 11px 14px; font-size: 12.5px; font-weight: 500; outline: none; min-width: 180px; font-family: inherit;
+  }
+  .demoCasePick:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,110,247,.14); }
+  .advanced { margin-top: 16px; border-top: 1px dashed var(--line); padding-top: 14px; }
+  .advanced summary { cursor: pointer; font-size: 12.5px; color: var(--sub); font-weight: 600; user-select: none; list-style: none; }
+  .advanced summary::-webkit-details-marker { display: none; }
+  .advanced summary::before { content: "▸ "; }
+  .advanced[open] summary::before { content: "▾ "; }
+  .advanced summary:hover { color: var(--accent); }
+  .advanced .hint code { color: var(--accent); background: var(--accent-soft); border-radius: 5px; padding: 0 5px; }
+  .noteWarn {
+    color: var(--warn); font-size: 12px; margin: 18px 0 0; line-height: 1.75;
+    padding: 11px 14px; background: var(--warn-soft); border: 1px solid rgba(217,138,6,.25); border-radius: 10px;
+  }
+  .noteWarn code { background: rgba(217,138,6,.14); padding: 1px 6px; border-radius: 5px; }
+
+  /* ── 结果区 ── */
+  .result {
+    margin-top: 26px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 24px; box-shadow: var(--shadow); display: none;
+  }
+  .result.show { display: block; animation: fadeUp .3s ease both; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  .rhead { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .rhead h2 { margin: 0; font-size: 18px; font-weight: 750; }
+  .status { font-size: 12.5px; font-weight: 700; padding: 6px 13px; border-radius: 999px; display: inline-flex; align-items: center; gap: 7px; }
+  .status.ok { color: var(--ok); background: var(--ok-soft); border: 1px solid rgba(14,159,110,.3); }
+  .status.bad { color: var(--bad); background: var(--bad-soft); border: 1px solid rgba(214,69,90,.3); }
+  .status.run { color: var(--warn); background: var(--warn-soft); border: 1px solid rgba(217,138,6,.3); }
+  .spinner { width: 13px; height: 13px; border: 2px solid rgba(184,119,8,.3); border-top-color: currentColor; border-radius: 50%; display: inline-block; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 20px 0 12px; }
+  .stat { padding: 16px 18px; border-radius: 12px; background: var(--panel2); border: 1px solid var(--line); }
+  .stat b { display: block; font-size: 28px; font-weight: 800; line-height: 1.1; letter-spacing: -.5px; }
+  .stat span { font-size: 12px; color: var(--sub); margin-top: 4px; display: block; }
+  .stat.pass b { color: var(--ok); }
+  .stat.fail b { color: var(--bad); }
+  .stat.total b { color: var(--txt); }
+  .bar { height: 10px; border-radius: 999px; background: #eceff6; overflow: hidden; margin: 12px 0 8px; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--ok), #34d399); transition: width .5s ease; }
+  .rate { font-size: 12.5px; color: var(--sub); }
+  .llmTag {
+    display: inline-block; margin-left: 8px; padding: 2px 10px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; background: var(--accent-soft); color: var(--accent);
+    border: 1px solid rgba(79,110,247,.25); white-space: nowrap;
+  }
+  .blocking {
+    margin: 16px 0 0; padding: 13px 15px; border-radius: 10px; background: var(--bad-soft);
+    border: 1px solid rgba(214,69,90,.3); border-left: 3px solid var(--bad);
+    color: #a32c3e; font-size: 13px; line-height: 1.75; white-space: pre-wrap;
+  }
+  .runHint {
+    margin: 16px 0 0; padding: 12px 15px; border-radius: 10px; background: var(--accent-soft);
+    border: 1px solid rgba(79,110,247,.25); border-left: 3px solid var(--accent);
+    color: #3a58d6; font-size: 12.5px; line-height: 1.75;
+  }
+  .racts { margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .btn2 {
+    border: 1px solid var(--line2); background: #fff; color: var(--txt); border-radius: 10px;
+    padding: 10px 18px; cursor: pointer; font-size: 13px; font-weight: 600; transition: .15s; font-family: inherit;
+  }
+  .btn2:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+  .logbox {
+    margin-top: 14px; background: #10182e; border: 1px solid #10182e; border-radius: 10px; padding: 14px;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; color: #a8b8e8;
+    white-space: pre-wrap; max-height: 300px; overflow: auto; display: none;
+  }
+  .logbox.show { display: block; }
+
+  /* ── 报告全屏弹窗（不再是被卡片框住的小 iframe） ── */
+  .modalMask {
+    position: fixed; inset: 0; background: rgba(15,22,40,.55); backdrop-filter: blur(3px);
+    display: none; align-items: center; justify-content: center; z-index: 50; padding: 20px;
+  }
+  .modalMask.show { display: flex; }
+  .modalBox {
+    width: min(1280px, 96vw); height: 92vh; background: #fff; border-radius: 14px;
+    overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 24px 80px rgba(15,22,40,.4);
+  }
+  .modalBar {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--panel2);
+  }
+  .modalBar b { font-size: 14px; }
+  .modalBar .meta { font-size: 12px; color: var(--sub); }
+  .modalClose {
+    border: 1px solid var(--line2); background: #fff; border-radius: 8px;
+    padding: 7px 14px; font-size: 12.5px; font-weight: 600; cursor: pointer; color: var(--sub); font-family: inherit;
+  }
+  .modalClose:hover { color: var(--bad); border-color: var(--bad); }
+  .modalBox iframe { flex: 1; border: 0; width: 100%; background: #fff; }
+
+  footer { margin-top: 40px; color: var(--dim); font-size: 12px; line-height: 1.9; text-align: center; }
+  footer code { color: var(--sub); background: #eceff6; padding: 1px 6px; border-radius: 5px; }
+
+  @media (max-width: 900px) { .tabs { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) {
+    h1 { font-size: 25px; }
+    .row2 { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: 1fr; }
+    .tabs { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="badge"><span class="dot"></span>方向二 · AI 测试官</span>
+    <h1>全链路自动化测试 <span class="grad">Agent</span></h1>
+    <p class="lead">
+      给一个 <b>公开 git 仓库地址 + 分支</b>，Agent 会在云沙箱里真实执行
+      <code>git clone → git diff → 精准选测 → node --test</code>，
+      理解变更、规划策略、真跑验证并产出可决策报告。点「使用内置示例填充」即可一键体验（非 mock，真实跑测）。
+    </p>
+  </header>
+
+  <div class="tabs" id="tabs"></div>
+
+  <section class="card">
+    <p class="scDesc" id="scDesc"></p>
+    <div id="form"></div>
+    <div class="actions">
+      <button class="run" id="runBtn">开始运行</button>
+      <button class="linkbtn" id="fillDemo" type="button">使用内置示例填充</button>
+      <label class="demoCaseWrap" for="demoCasePick">内置案例
+        <select id="demoCasePick" class="demoCasePick">
+          <option value="case1">case1 · 电商优惠券</option>
+          <option value="case2">case2 · 停车场计费</option>
+        </select>
+      </label>
+    </div>
+
+    <details class="advanced">
+      <summary>高级选项（可选）</summary>
+      <div class="field" style="margin-top:12px">
+        <label for="fld-webhook">企微机器人 webhook（场景跑完后推送结果；留空则不推送）</label>
+        <input id="fld-webhook" type="text" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." />
+        <div class="hint">webhook 地址仅用于本次运行，不会写入报告或日志。长期推送建议在服务端配置环境变量 <code>WEBHOOK_URL</code>。</div>
+      </div>
+    </details>
+
+    <p class="noteWarn">
+      仓库需<b>公开可 clone</b>（内网/私有仓库沙箱访问不到）；被测项目建议为可 <code>node --test</code> 的 Node 仓库。
+      真实跑测通常需数十秒~一两分钟。
+    </p>
+  </section>
+
+  <section class="result" id="result">
+    <div class="rhead">
+      <h2 id="rTitle">运行结果</h2>
+      <span class="status run" id="rStatus"><span class="spinner"></span> 运行中…</span>
+    </div>
+    <div id="rBody"></div>
+    <div class="racts" id="rActs" style="display:none">
+      <button class="btn2" id="btnReport" type="button">查看完整报告</button>
+      <button class="btn2" id="btnLog" type="button">运行日志</button>
+    </div>
+    <pre class="logbox" id="rLog"></pre>
+  </section>
+
+  <footer>
+    AI 测试官 · 首页 <code>/</code> 静态托管，运行调 <code>POST /test-officer</code><br>
+    LLM 语义层未配置时自动回退确定性逻辑，跑测结论不受影响。
+  </footer>
+</div>
+
+<!-- 报告全屏弹窗 -->
+<div class="modalMask" id="rModal">
+  <div class="modalBox">
+    <div class="modalBar">
+      <b id="rModalTitle">完整报告</b>
+      <span class="meta" id="rModalMeta"></span>
+      <button class="modalClose" id="btnCloseModal" type="button">✕ 关闭</button>
+    </div>
+    <iframe id="rModalFrame" title="report"></iframe>
+  </div>
+</div>
+
+<script>
+// 内置示例仓库（配套可用：含 case1 / case2 两套 demo 与演示分支）。
+// 点「使用内置示例填充」会结合下方案例选择器，为当前场景填入对应默认值。
+const DEMO_REPO = 'https://github.com/guokeqianhg/HACK_case.git';
+
+const DEMO_CASES = {
+  case1: {
+    label: 'case1 · 电商优惠券',
+    shortLabel: 'case1 电商',
+    requirementText: `# 需求文档：迷你电商「下单 / 优惠券」
+
+需求ID: TAPD-100123
+
+## 模块：src/coupon.js
+### 测试点 P1：满减券达到门槛立减固定金额，未达门槛则不生效
+关联用例：满减券
+
+### 测试点 P2：无门槛立减券直接立减固定金额
+关联用例：无门槛立减
+
+### 测试点 P3：折扣券在前面减完后按比例减价（如 9 折 = 减 10%）
+关联用例：折扣券
+
+### 测试点 P4：最终应付金额不低于 0（价格不为负）
+关联用例：价格不为负
+
+## 模块：src/inventory.js
+### 测试点 P5：库存不足时下单失败并回滚已扣库存
+
+## 模块：src/order.js
+### 测试点 P6：下单成功返回订单号、原价、应付金额与优惠明细
+
+## 背景说明
+- 优惠券可叠加使用（每类最多 1 张），叠加顺序：满减 → 无门槛 → 折扣。
+- 所有金额以「分」为整数单位计算，前端展示时格式化为「¥x.xx」。
+- 空购物车不可下单。`,
+    scenarios: {
+      A: { repoUrl: DEMO_REPO, base: 'main', target: 'feature/coupon-bug' },
+      B: { repoUrl: DEMO_REPO },
+      C: { repoUrl: DEMO_REPO, target: 'feature/coupon-bug' },
+      D: { repoUrl: DEMO_REPO, base: 'feature/coupon-bug', target: 'main' },
+      E: { repoUrl: DEMO_REPO, target: 'feature/coupon-refund-guard', merge: 'feature/coupon-floor-guard' },
+    },
+  },
+  case2: {
+    label: 'case2 · 停车场计费',
+    shortLabel: 'case2 停车场',
+    requirementText: `# 需求文档：停车场计费与高峰放行系统
+
+> 本文件可作为「AI 测试官」场景 B（需求文档 → 验证实现）的 Markdown 输入。
+> 约定：\`## 模块：<相对 case2 的源码路径>\` 声明测试点归属模块；\`### 测试点 <id>：<描述>\` 声明一个测试点；\`关联用例：<用例名子串>\` 用于精确核对（可选）。
+
+需求ID: TAPD-200234
+
+## 模块：src/pricing.js
+### 测试点 P1：停车不超过 15 分钟免费
+关联用例：15 分钟内免费
+
+### 测试点 P2：小型车按每开始 1 小时 6 元收费
+关联用例：小型车按每开始 1 小时 6 元收费
+
+### 测试点 P3：大型车按每开始 1 小时 10 元收费
+关联用例：大型车按每开始 1 小时 10 元收费
+
+### 测试点 P4：会员在正常费用基础上打 9 折
+关联用例：会员按正常费用打 9 折
+
+### 测试点 P5：挂失票按一口价收费
+关联用例：挂失票按一口价
+
+## 模块：src/ticket.js
+### 测试点 P6：车辆出场成功后，返回车牌、停车时长与实收金额，并从场内列表移除
+关联用例：出场成功返回金额并移除车辆
+
+### 测试点 P7：不存在或已结算的票据不可重复出场
+关联用例：不存在票据时返回 NOT_FOUND
+
+### 测试点 P8：高峰放行估算支持批量输入，返回车辆数、总费用、均价与接口耗时
+关联用例：高峰估算返回 count 和平均价
+
+## 模块：src/server.js
+### 测试点 P9：前端首页可查询当前待出场车辆与预估费用
+
+## 背景说明（非结构化，仅作人类阅读）
+- 系统维护当前场内待出场车辆列表。
+- 页面默认展示一个固定演示时间点下的“预计应收金额”，便于测试结果稳定复现。
+- 高峰放行估算用于模拟出口拥堵时的一次性批量收费计算，以便讲解性能与容量问题。
+- 当前实现使用内存数据，目的是方便本地快速演示，而不是做完整生产系统。`,
+    scenarios: {
+      A: { repoUrl: DEMO_REPO, base: 'main', target: 'feature/free-window-bug' },
+      B: { repoUrl: DEMO_REPO },
+      C: { repoUrl: DEMO_REPO, target: 'feature/free-window-bug' },
+      D: { repoUrl: DEMO_REPO, base: 'feature/free-window-bug', target: 'fix/parking-pricing' },
+      E: { repoUrl: DEMO_REPO, target: 'feature/peak-member-pass', merge: 'feature/peak-analytics-guard' },
+    },
+  },
+};
+
+// 每个场景：描述 + 核心问题 + 需要哪些输入字段
+const SCENARIOS = {
+  A: {
+    name: '代码改动 → 针对性测试',
+    desc: '你改了哪些文件，就只跑跟这些文件相关的测试用例，而不是把所有测试全跑一遍。AI 语义理解改动意图，精准选测 + 真实跑测 + 根因归因。',
+    core: '这改动安全吗？',
+    fields: ['repoUrl', 'base', 'target'],
+    labels: { base: '改动前的分支', target: '改动后的分支' },
+  },
+  B: {
+    name: '需求文档 → 覆盖度检查',
+    desc: '给一份需求文档，AI 自主拆解测试点，核对代码里有没有实现、测试有没有覆盖，找出漏掉的功能点和测试盲区。',
+    core: '需求落地了吗？',
+    fields: ['repoUrl', 'requirementText'],
+    labels: {},
+  },
+  C: {
+    name: '持续巡检',
+    desc: '对指定分支全量跑测，发现失败就推送告警。适合放在流水线里定时跑，第一时间发现代码腐化。',
+    core: '系统还健康吗？',
+    fields: ['repoUrl', 'target'],
+    labels: { target: '要巡检的分支' },
+  },
+  D: {
+    name: 'Bug 修复验证',
+    desc: '先在缺陷分支上复现 bug（应失败），再在修复分支上验证（应通过）。AI 判定缺陷是否真的修好、有没有引入新回归。',
+    core: 'bug 真的修好了吗？',
+    fields: ['repoUrl', 'base', 'target'],
+    labels: { base: '有 bug 的分支', target: '修完后的分支' },
+  },
+  E: {
+    name: '合并前检查',
+    desc: '两个分支各自测试都通过，但合到一起后可能互相影响。模拟合并后再跑测试，区分文本冲突和语义冲突，AI 解释为什么冲突。',
+    core: '能安全合并吗？',
+    fields: ['repoUrl', 'target', 'merge'],
+    labels: { target: '要合并的分支 A', merge: '要合并的分支 B' },
+  },
+};
+const ORDER = ['A', 'B', 'C', 'D', 'E'];
+let current = 'A';
+
+const FIELD_META = {
+  repoUrl: { label: '公开仓库 URL', type: 'input', ph: '点「使用内置示例填充」自动带上示例仓库；或填你自己的 https://github.com/owner/repo.git', hint: 'Git URL 指向仓库根。' },
+  base:   { label: 'base 分支', type: 'input', ph: 'main（当前所选 case 的主线）' },
+  target: { label: 'target 分支', type: 'input', ph: 'feature/xxx（同一 case 下的分支）' },
+  merge:  { label: 'merge 分支', type: 'input', ph: 'feature/yyy（同一 case 下的分支）' },
+  requirementText: { label: '需求文本', type: 'textarea', ph: '粘贴需求原文；留空则用内置示例需求。支持自由文本，AI 会自主拆解测试点。', hint: '留空 = 用内置示例仓库的 docs/requirement.md。' },
+};
+
+const tabsEl = document.getElementById('tabs');
+const descEl = document.getElementById('scDesc');
+const formEl = document.getElementById('form');
+const demoCasePick = document.getElementById('demoCasePick');
+
+function getSelectedDemoCase() {
+  const key = demoCasePick && demoCasePick.value;
+  return DEMO_CASES[key] ? key : 'case1';
+}
+
+function getDemoPreset(scenarioId) {
+  const demo = DEMO_CASES[getSelectedDemoCase()];
+  const preset = { ...(demo.scenarios[scenarioId] || {}) };
+  if (scenarioId === 'B') preset.requirementText = demo.requirementText;
+  return preset;
+}
+
+function renderTabs() {
+  tabsEl.innerHTML = '';
+  ORDER.forEach(id => {
+    const s = SCENARIOS[id];
+    const el = document.createElement('button');
+    el.className = 'tab' + (id === current ? ' active' : '');
+    el.innerHTML = `<span class="tabL">${id}</span><b>${s.name}</b><span>${s.core}</span>`;
+    el.onclick = () => { current = id; renderTabs(); renderForm(); };
+    tabsEl.appendChild(el);
+  });
+}
+function renderForm() {
+  const s = SCENARIOS[current];
+  descEl.innerHTML = `<div class="descCore">${escHtml(s.core)}</div><div class="descText">${escHtml(s.desc)}</div>`;
+  formEl.innerHTML = '';
+  const branchFields = s.fields.filter(f => ['base', 'target', 'merge'].includes(f));
+  const otherFields = s.fields.filter(f => !['base', 'target', 'merge'].includes(f));
+
+  // 非分支字段（repoUrl / requirementText）逐个整行
+  otherFields.forEach(f => formEl.appendChild(fieldNode(f, s)));
+  // 分支字段两列排布
+  if (branchFields.length) {
+    const wrap = document.createElement('div');
+    wrap.className = branchFields.length >= 2 ? 'row2' : '';
+    branchFields.forEach(f => wrap.appendChild(fieldNode(f, s)));
+    formEl.appendChild(wrap);
+  }
+}
+function fieldNode(f, s) {
+  const m = FIELD_META[f];
+  const label = (s.labels && s.labels[f]) || m.label;
+  const div = document.createElement('div');
+  div.className = 'field';
+  const ctrl = m.type === 'textarea'
+    ? `<textarea id="fld-${f}" placeholder="${escAttr(m.ph)}"></textarea>`
+    : `<input id="fld-${f}" type="text" placeholder="${escAttr(m.ph)}" />`;
+  div.innerHTML = `<label>${label}</label>${ctrl}${m.hint ? `<div class="hint">${m.hint}</div>` : ''}`;
+  return div;
+}
+function fillDemo() {
+  const preset = getDemoPreset(current);
+  Object.entries(preset).forEach(([k, v]) => {
+    const el = document.getElementById('fld-' + k);
+    if (el) el.value = v;
+  });
+}
+document.getElementById('fillDemo').onclick = fillDemo;
+// 切换内置案例时自动重新填充当前场景参数（含场景 B 需求文本），
+// 避免「案例 A 的需求文档配案例 B 的仓库」这类错配（会导致模块全部 missing 的误报）。
+demoCasePick.addEventListener('change', fillDemo);
+
+// ── 运行 ──
+function convId() {
+  let id = sessionStorage.getItem('makers-conv-id');
+  if (!id) { id = 'web-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8); sessionStorage.setItem('makers-conv-id', id); }
+  return id;
+}
+const result = document.getElementById('result');
+const rTitle = document.getElementById('rTitle');
+const rStatus = document.getElementById('rStatus');
+const rBody = document.getElementById('rBody');
+const rActs = document.getElementById('rActs');
+const rLog = document.getElementById('rLog');
+const btnReport = document.getElementById('btnReport');
+const btnLog = document.getElementById('btnLog');
+const runBtn = document.getElementById('runBtn');
+const rModal = document.getElementById('rModal');
+const rModalFrame = document.getElementById('rModalFrame');
+const rModalTitle = document.getElementById('rModalTitle');
+const rModalMeta = document.getElementById('rModalMeta');
+const btnCloseModal = document.getElementById('btnCloseModal');
+let running = false;
+
+runBtn.onclick = () => { if (!running) run(); };
+
+function closeModal() { rModal.classList.remove('show'); }
+btnCloseModal.onclick = closeModal;
+rModal.onclick = (e) => { if (e.target === rModal) closeModal(); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+
+function collectParams() {
+  const s = SCENARIOS[current];
+  const p = {};
+  s.fields.forEach(f => {
+    const el = document.getElementById('fld-' + f);
+    if (!el) return;
+    const v = el.value.trim();
+    if (!v) return;
+    if (f === 'repoUrl') p.repoUrl = v;
+    else if (f === 'requirementText') p.requirementText = v;
+    else p[f] = v; // base/target/merge
+  });
+  // 全局可选：企微 webhook（场景跑完后推送；留空不推送）
+  const wh = document.getElementById('fld-webhook');
+  if (wh && wh.value.trim()) p.webhook = wh.value.trim();
+  // repoUrl 留空，或显式填了内置 demo 仓库地址，都按当前选中的内置案例走 Agent 内置路径。
+  if (!p.repoUrl || p.repoUrl === DEMO_REPO) {
+    p.demoCase = getSelectedDemoCase();
+    delete p.repoUrl;
+  }
+  return p;
+}
+
+async function run() {
+  running = true;
+  runBtn.disabled = true;
+  const scenario = current;
+  const params = collectParams();
+  result.classList.add('show');
+  rTitle.textContent = `场景 ${scenario} 运行结果`;
+  rStatus.className = 'status run';
+  rStatus.innerHTML = '<span class="spinner"></span> 沙箱克隆 + 真实跑测中…';
+  rBody.innerHTML = '<div class="runHint">正在执行：git clone → AI 语义理解 → 精准选测 → 真实跑测 → 生成报告（通常数十秒~一两分钟）</div>';
+  rActs.style.display = 'none';
+  rLog.className = 'logbox'; rLog.textContent = '';
+  closeModal(); rModalFrame.removeAttribute('srcdoc');
+  result.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  try {
+    const resp = await fetch('/test-officer', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'makers-conversation-id': convId() },
+      body: JSON.stringify({ scenario, params }),
+    });
+    render(await resp.json());
+  } catch (err) {
+    rStatus.className = 'status bad';
+    rStatus.textContent = '调用失败';
+    rBody.innerHTML = `<div class="blocking">请求 /test-officer 失败：${escHtml(String(err))}\n若在本地打开静态文件会失败，请通过已部署的服务地址访问。</div>`;
+  } finally {
+    running = false;
+    runBtn.disabled = false;
+  }
+}
+
+function render(data) {
+  if (!data || data.ok === false) {
+    rStatus.className = 'status bad';
+    rStatus.textContent = '执行失败';
+    rBody.innerHTML = `<div class="blocking">${escHtml((data && (data.error || data.hint)) || '未知错误')}</div>`;
+    showLog(data);
+    rActs.style.display = 'flex'; btnReport.style.display = 'none';
+    return;
+  }
+  const s = data.summary || {};
+  const total = num(s.total), pass = num(s.pass), fail = num(s.fail);
+  const rate = total ? Math.round(pass / total * 100) : 0;
+  const healthy = fail === 0 && total > 0;
+  const empty = total === 0;
+
+  rStatus.className = 'status ' + (empty ? 'bad' : (healthy ? 'ok' : 'bad'));
+  rStatus.textContent = empty ? '未产出结果' : (healthy ? '全部符合预期' : `发现 ${fail} 个问题`);
+
+  const modeTag = data.repoMode === 'user-repo'
+    ? '用户仓库'
+    : `内置示例 ${(DEMO_CASES[data.demoCase] && DEMO_CASES[data.demoCase].shortLabel) || 'case1 电商'}`;
+
+  // 从 stderr 提取 LLM 使用情况（调用了几次、累计耗时）
+  const stderr = data.engineStderrTail || '';
+  const stdout = data.engineStdoutTail || '';
+  const llmMatch = (stderr + stdout).match(/LLM (\d+) 次调用累计 ([\d.]+)s/);
+  const llmTag = llmMatch
+    ? `<span class="llmTag">AI 语义层 · ${llmMatch[1]} 次调用 · ${llmMatch[2]}s</span>`
+    : '';
+
+  const blocking = empty
+    ? `<div class="blocking">引擎未产出有效报告（total=0）。常见原因：分支名不存在、仓库无可运行测试、或 clone 失败。可点「运行日志」查看引擎输出定位。</div>`
+    : (Array.isArray(s.blocking) && s.blocking.length ? `<div class="blocking"><b>阻断项：</b>\n${s.blocking.map(escHtml).join('\n')}</div>` : '');
+
+  rBody.innerHTML = `
+    <div class="stats">
+      <div class="stat total"><b>${total}</b><span>用例总数</span></div>
+      <div class="stat pass"><b>${pass}</b><span>符合预期</span></div>
+      <div class="stat fail"><b>${fail}</b><span>发现问题</span></div>
+    </div>
+    <div class="bar"><i style="width:${rate}%"></i></div>
+    <div class="rate">通过率 ${rate}% · 被测：${escHtml(modeTag)} · 报告：${escHtml(data.reportName || '-')}${llmTag}</div>
+    ${blocking}`;
+
+  const html = data.reportHtmlContent || '';
+  if (html) {
+    btnReport.style.display = 'inline-block';
+    btnReport.textContent = '查看完整报告';
+    btnReport.onclick = () => {
+      rModalTitle.textContent = `场景 ${current} · 完整测试报告`;
+      rModalMeta.textContent = data.reportName || '';
+      if (!rModalFrame.getAttribute('srcdoc')) rModalFrame.setAttribute('srcdoc', html);
+      rModal.classList.add('show');
+    };
+  } else if (data.reportHtml) {
+    btnReport.style.display = 'inline-block';
+    btnReport.textContent = '打开报告看板';
+    btnReport.onclick = () => window.open(data.reportHtml, '_blank');
+  } else {
+    btnReport.style.display = 'none';
+  }
+  rActs.style.display = 'flex';
+  showLog(data);
+}
+
+function showLog(data) {
+  const out = (data && data.engineStdoutTail) || '';
+  const err = (data && data.engineStderrTail) || '';
+  const text = [out && '── stdout ──\n' + out, err && '── stderr ──\n' + err].filter(Boolean).join('\n\n');
+  rLog.textContent = text || '（无日志输出）';
+  btnLog.onclick = () => rLog.classList.toggle('show');
+}
+function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
+function escHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function escAttr(s) { return escHtml(s).replace(/\n/g, ' '); }
+
+renderTabs();
+renderForm();
+</script>
+</body>
+</html>

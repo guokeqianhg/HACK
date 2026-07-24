@@ -14,7 +14,6 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
-const REPORT_DIR = __dirname;
 
 const args = process.argv.slice(2).reduce((m, a, i, arr) => {
   if (a.startsWith('--')) {
@@ -26,6 +25,9 @@ const args = process.argv.slice(2).reduce((m, a, i, arr) => {
 }, {});
 const PORT = Number(args.port || process.env.LIVE_PORT || 5177);
 const HOST = args.host || process.env.LIVE_HOST || '127.0.0.1';
+// 可视化数据目录（问题四：不再写死 report/）。支持 --dir <path> 或 LIVE_DIR 指向任意目录，
+// 看板会扫描该目录下的 .live-*.ndjson 事件流与 *.html 报告，实现"任意路径自动适配"。
+const REPORT_DIR = args.dir ? path.resolve(process.cwd(), String(args.dir)) : __dirname;
 
 // 列出当前所有实时事件文件（.live-<run>.ndjson），供页面下拉选择正在跑的是哪个场景
 function listRuns() {
@@ -123,6 +125,12 @@ function iconFor(status){
   return '…';
 }
 
+// 报告链接自动适配：完整 URL（http/https）原样跳转，否则按看板目录内相对路径打开
+function reportHref(f){
+  if (!f) return '#';
+  return /^https?:\/\//i.test(f) ? f : ('./' + f);
+}
+
 function ensurePhaseEl(ev){
   const key = ev.phase || ('log-' + ev.seq);
   if (phaseNodes.has(key)) return phaseNodes.get(key);
@@ -173,7 +181,7 @@ function renderEvent(ev){
       '<div class="fs"><b>' + (s.total ?? '-') + '</b>总用例</div>' +
       '<div class="fs pass"><b>' + (s.pass ?? '-') + '</b>通过</div>' +
       '<div class="fs fail"><b>' + (s.fail ?? '-') + '</b>失败</div>' +
-      '<div class="fs" style="display:flex;align-items:center;justify-content:center"><a class="reportlink" href="./' + (ev.detail?.reportFile || '') + '" target="_blank">📊 查看完整报告 →</a></div>';
+      '<div class="fs" style="display:flex;align-items:center;justify-content:center"><a class="reportlink" href="' + reportHref(ev.detail?.reportFile) + '" target="_blank">📊 查看完整报告 →</a></div>';
   }
 }
 
@@ -271,5 +279,6 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`🛰️  AI 测试官实时看板已启动：http://${HOST}:${PORT}`);
+  console.log(`   数据目录：${REPORT_DIR}${args.dir ? '（--dir 指定）' : '（默认，可用 --dir <path> 指向任意目录）'}`);
   console.log(`   保持此进程运行，另开终端执行 node agent/run-test-officer.mjs ... 或 node agent/demo.mjs 即可实时观察。`);
 });

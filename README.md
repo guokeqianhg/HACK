@@ -11,7 +11,12 @@ f:/HACK
 │   ├── tests/             # 零依赖单测（node:test）
 │   ├── smoke/             # api-smoke（离线兜底）/ ui-smoke（Playwright）
 │   └── docs/requirement.md# 场景 B 需求输入
-├── agent/                 # AI 测试官系统提示词
+├── agent/                 # AI 测试官引擎 + MCP Server
+│   ├── run-test-officer.mjs  # 执行引擎（理解→规划→真实跑测→报告）
+│   ├── mcp-server.mjs        # ⭐ MCP Server 包裹（stdio + HTTP/SSE，供 Box/任意 MCP 客户端调度）
+│   ├── cron-monitor.mjs      # 场景 C 定时巡检 + 企微推送
+│   ├── demo.mjs              # 一键串五场景
+│   └── llm.mjs / agent.mjs / officer-tools.mjs / select-tests.mjs / live-emitter.mjs
 ├── .codebuddy/commands/   # /test-officer 快捷命令
 ├── report/                # generate-report.mjs + report.json → index.html 看板
 └── mcp.json               # TGit/TAPD/Playwright/企微 MCP 配置示例
@@ -38,6 +43,21 @@ f:/HACK
 | `LLM_MODEL` | 模型名 | `gpt-4o-mini` |
 
 启用后：场景 A/C 的「理解变更」会输出改动意图、风险等级、受影响业务流程与建议验证重点（自然语言，并写入报告时间线）；失败用例的 `rootCause` 由模型结合 diff + 日志做语义归因而非正则提取。
+
+### 运行档位与用法（五场景各自独立触发，不必一起跑）
+五个场景对应五个不同的触发时机（提交代码 / 拿到需求 / 定时巡检 / 修完 bug / 合并前），**现实中各自独立触发**，MCP 的 `run_test_officer` 也是一次一个场景。因此推荐**分场景单独跑**，不必用一键六场景（那只是演示聚合页）。三档运行模式：
+
+| 档位 | 开关 | 单场景耗时（实测，端点 60 RPM） | 适用 |
+|---|---|---|---|
+| **离线** | `LLM_OFF=1` | 秒级 | 评审现场、纯验证链路（结论与在线完全一致，因结论由真实跑测决定，不靠 LLM） |
+| **默认（AI 增强）** | 不设开关 | 约 75s（3 次 LLM 调用） | 展示 AI 语义理解 / 根因归因 |
+| **完整 Agent** | `ENABLE_REACT=1` | 约 115s（+ReAct 多轮自主规划） | 需展示 Agent 自主规划轨迹（Think→Act→Observe） |
+
+- `FAST_MODE=1`（或 `--fast`）：等价于最少 LLM 调用（关 ReAct）。
+- `LLM_TIMEOUT_MS`（默认 30000）：单次 LLM 调用超时；慢代理下早失败早回退。
+- 性能来源说明：结论（有无 bug / 是否修复 / 是否语义冲突）100% 由 `git worktree` 里真实跑测决定，LLM 只做「可读性增强」（意图/风险/根因人话），故**离线也能得到完全正确的分析结论**。
+
+> ⚠️ 不要用并行跑多场景来提速：LLM 端点通常有 RPM 限流（实测 60），并行会触发 429 限流退避反而更慢。分场景串行是正确用法。
 
 ## 自适应策略（P1 · 失败驱动的动态闭环）
 引擎不再是「固定流水线跑完即结束」：首轮执行若出现失败，会自动进入自适应阶段，根据中间结果调整后续策略：
@@ -116,6 +136,39 @@ git diff main feature/coupon-bug   # 查看改动（单文件：折扣券 9 折�
 真实可跑：AI 测试官读取 diff → 影响分析 → 运行 `node --test`、API 冒烟 `node smoke/api-smoke.mjs`，并在安装 Playwright 后自动追加真实浏览器 UI 冒烟（结账/折扣券路径）→ 生成含严重级别/根因/复现的报告。
 （口径：`feature/coupon-bug` 相对 `main` 为**单文件改动**——`src/coupon.js` 折扣券漏写 `(1 - )`，把「9 折」算成「1 折」的资损级 bug。在 `main` 上全量回归全部通过（0 失败）；在 `feature/coupon-bug` 上，该 bug 会引发一组同源失败（折扣券本身 + 叠加/下单/API/UI 链路，以及 AI 生成的回归守卫命中）。场景 A 走「精准选测 + 自适应扩展选测」只跑受影响测试及其隐性关联测试，当前实测约为 **19 符合预期 / 10 个问题**（含 UI 冒烟与 2 个 AI 生成回归守卫命中）。以上数字会随 `tests/generated-*.test.js` 回归守卫的增减而变化，属正常现象，可随时通过 `node agent/run-test-officer.mjs --scenario A` 或 `node agent/demo.mjs` 现场重新产出验证，不依赖手工维护。）
 
+## 通用性：任意仓库 / 远端 URL / 任意可视化目录
+
+引擎不绑定 `sample-app`——核心链路对任意 Node 仓库通用，输入来源与可视化路径均可配置：
+
+**① 直接跑远端仓库（自动 clone，无需先有本地副本）**
+```bash
+# 给一个 git 地址，引擎自动 clone（含全部分支）后跑测，与本地仓库路径完全等价
+node agent/run-test-officer.mjs --repo-url https://github.com/owner/repo.git \
+  --base main --target feature/x --scenario A
+# 被测项目在 monorepo 子目录时，加 --repo-subdir 指定：
+node agent/run-test-officer.mjs --repo-url https://github.com/owner/mono.git \
+  --repo-subdir packages/app --base main --target dev --scenario A
+```
+> `--repo`（本地目录）与 `--repo-url`（远端地址）二选一；后者 clone 到临时目录并为所有 `origin/*` 建本地分支，保证 `--base/--target/--merge` 可被 worktree 解析。
+
+**② 前端 UI 冒烟解耦（换仓库不再写死 sample-app 的启动方式）**
+```bash
+node agent/run-test-officer.mjs --repo-url <url> --scenario A \
+  --ui-start "npm run start:test" \   # 被测前端启动命令（默认 node src/server.js）
+  --ui-spec  "e2e/smoke.spec.js" \    # Playwright spec 相对仓库根（默认 smoke/ui-smoke.spec.js）
+  --ui-ready "/health"                # 就绪探活路径（默认 /api/products）
+# 被测仓库无前端时，用 --ui-off 关闭 UI 冒烟（后端单测+API 冒烟照常）
+```
+
+**③ 可视化任意目录（不再写死 report/）**
+```bash
+# 看板扫描指定目录下的 .live-*.ndjson 与 *.html 报告，实现任意路径自动适配
+node report/live-server.mjs --dir /path/to/any/reports --port 5177
+```
+> 报告链接自动适配：`done` 事件的 `reportFile` 为完整 URL 时直接跳转，否则按看板目录相对打开。
+
+以上三项对 MCP 调用同样可用：`run_test_officer` 新增入参 `repoUrl` / `uiStart` / `uiSpec` / `uiReady` / `uiOff`。
+
 ## 演示「持续巡检 + 异常推送」(场景 C)
 场景 C 不依赖代码改动，而是**定时对目标分支做全量回归**，发现失败用例时通过企微机器人 webhook 推送告警，并用状态文件去重避免刷屏。
 
@@ -179,6 +232,7 @@ node agent/run-test-officer.mjs --repo sample-app --base main --target feature/c
 - **执行结果表**：用例 / 类型（unit/api/ui）/ 状态 / 严重级 / 根因 / 复现；前端 UI 未装 Playwright 时显示 `⏭ SKIP` 不计入通过率。
 
 ## 平台能力（Box/CodeBuddy）
+- **AI 测试官 MCP Server（形态出口，见「接入 Box 平台」节）**：`agent/mcp-server.mjs` 把五场景封装为标准 MCP 工具（`list_scenarios` / `run_test_officer` / `get_report`），Box 平台以「命令」或「URL（MCP 连接器）」两种方式接入即可调度，无需改业务代码。
 - **TGit/工蜂 MCP（已接入 `/test-officer`）**：场景 A 真实调用 `get_merge_request_diff` 取 PR/MR diff → 写 `report/.mcp-diff.txt` → `run-test-officer.mjs --diff` 喂入，闭环跑测。
 - **TAPD MCP（已接入 `/test-officer`）**：场景 B 真实调用 `get_story`/`get_bug` 取需求/缺陷 → 整理为 fixture 写 `report/.mcp-req.json` → `run-test-officer.mjs --requirement` 喂入，产出覆盖度报告。
 - **Playwright MCP**：驱动真实浏览器（前端体验）；或沿用引擎内置的 `@playwright/test` UI 冒烟。
@@ -203,4 +257,109 @@ node agent/run-test-officer.mjs --repo sample-app --base main --target feature/c
 # ③ 跑完真实把报告推送到企微（有 WEBHOOK_URL 时）
 ```
 > 经本地 mock 工蜂 REST + 企微 webhook 验证：拉取/回写/推送三条 HTTP 路径均真实发起并已落盘，断言全 PASS。
+
+## 接入 Box 平台（MCP 连接器 · 形态：Server）
+
+赛题推荐用 Box 平台的「MCP 连接器」能力。`agent/mcp-server.mjs` 把整个执行引擎包成一个**标准 MCP Server**，让 Box（或任意 MCP 客户端）以「命令」或「URL」两种方式接入，从而把"AI 测试官"作为可被平台调度/编排的标准工具。已通过 stdio 端到端真跑场景 A、HTTP/SSE 完成握手 + 列工具两项验证。
+
+**暴露的工具：**
+- `list_scenarios` — 列出五场景语义与触发方式
+- `run_test_officer` — 执行某场景（支持 `useDemoDefaults` 零配置体验；可传 `base/target/requirement/merge/pr/webhook` 等）
+- `get_report` — 回放某次运行的报告结论
+
+### 方式一：命令（stdio）— Box 以命令拉起（推荐本地 / 评审机）
+在 Box MCP 连接器填：
+```
+command: node
+args:    ["agent/mcp-server.mjs"]
+cwd:     <仓库根 f:/HACK>
+env:     LLM_API_KEY / LLM_BASE_URL / LLM_MODEL（可选，不填自动回退确定性逻辑）
+```
+
+### 方式二：URL（HTTP/SSE）— Box 以 URL 注册（适合内网/评审访问）
+先启动服务（默认本地，安全）：
+```bash
+node agent/mcp-server.mjs --http --port 3001
+# 探活：http://127.0.0.1:3001/health
+```
+在 Box MCP 连接器填 URL：`http://<host>:3001/mcp`。
+> ⚠️ **安全**：仅绑定 `127.0.0.1` 时任何人摸不到；若用 `--host 0.0.0.0` 对外暴露，**必须**加 `--token <secret>`，否则服务会直接拒绝启动（引擎会 spawn 进程跑测试，裸暴露等价于开放任意命令执行）。Box 侧在 URL 鉴权头填 `Authorization: Bearer <secret>`。
+
+### 一键体验（给 Box / 评审同学）
+调用 `run_test_officer` 时传 `{"scenario":"A","useDemoDefaults":true}`（或 B/C/D/E），无需任何分支参数即可看到真实测试报告——引擎会自动套用演示分支（如 `feature/coupon-bug`）并真实跑测，非 mock。
+
+## 部署到 EdgeOne Makers（赛题"Box 平台"即指此）
+
+赛题文档中的"Box 平台"对应 **EdgeOne Makers**（腾讯云边缘一站式部署控制台）。本作品以 **Agents** 形态部署：`agents/test-officer/index.ts` 导出 `onRequest(context)`，引擎在 `context.sandbox` 里真实跑（命令执行 / git worktree / 子进程全由沙箱承载），并后台起看板拿可访问预览链接。
+
+> 本仓库的 `demo-console`/`live-server` 是 Web 服务，但 Makers 的 Web/Node Functions **禁止自行监听端口**，且部署 Agent 后才能拿到沙箱能力，故主部署选 Agent 形态。
+
+### 静态首页（解决预览 404 · 一键演示入口）
+纯 Agent 部署时根路径没有页面 → 打开预览链接是 404。为此新增静态首页 `web/index.html`（零依赖、内联 CSS/JS）：
+- 展示五场景（A/B/C/D/E）卡片，点击「▶ 运行」→ 前端 `POST /test-officer`（带 `makers-conversation-id` 头）真实触发 Agent 跑测；
+- 等待返回后展示 summary（用例总数 / 符合预期 / 发现问题 + 通过率进度条 + 阻断项）与运行日志；
+- 「查看完整报告」直接用 Agent 随响应回传的报告 HTML 全文（`reportHtmlContent`）内嵌 iframe 渲染，**不依赖看板端口是否可达**。
+
+`edgeone.json` 已把 `outputDirectory` 指到 `web/`，静态首页与 `POST /test-officer` Agent 端点在同一域名下共存（`/` 出页面、`/test-officer` 跑测）。本地联调：`$env:PAGES_SOURCE="skills"; edgeone makers dev`，浏览器打开 `http://127.0.0.1:8088/` 即见首页。
+
+### 已就绪的文件（均按平台规范对齐）
+- `agents/test-officer/index.ts` — Agent 入口（`.ts` 是平台约定扩展名）。解析 `scenario`/`params`，用 `context.sandbox.commands.run` 跑引擎，用 `context.sandbox.files.read` 读报告，用 `context.sandbox.getHost` 拿看板预览链接。**全程不碰 `process.env`/`process.cwd()`**（平台硬规则）。
+- `edgeone.json` — 仅声明 `agents.framework: "claude-agent-sdk"`（必填，决定控制台图标与 `context.tools` 形态；本作品核心用 `context.sandbox`）。
+- `package.json` — `"type":"module"`、`engines.node >=18`、`start`/`dev`/`build` 脚本。
+- `agent/glob-shim.mjs` — **沙箱兼容关键**：`node:fs.globSync` 仅 Node ≥22 内置，垫片在旧版本回退同步递归实现，避免引擎在沙箱直接崩溃。
+- `.env.example` — 必须含 `AI_GATEWAY_API_KEY=` / `AI_GATEWAY_BASE_URL=`，CLI 部署时据此**自动注入**平台内置模型网关（免费额度）。
+
+### 部署步骤（按官方 Skill 流程）
+> 环境变量 `PAGES_SOURCE=skills` 必须在**每条** `edgeone` 命令前带上（声明来自 AI Skill 上下文）。
+> ⚠️ **Windows PowerShell 注意**：没有 `export` 命令，请用 `$env:PAGES_SOURCE="skills"` 设置，或写成内联：`$env:PAGES_SOURCE="skills"; edgeone makers deploy ...`。
+
+```bash
+# 0) 安装 CLI（≥ 1.6.0，否则非交互环境会卡死）
+npm install -g edgeone@latest
+edgeone -v
+
+# 1) 设环境变量（PowerShell 写法；bash 用 export PAGES_SOURCE=skills）
+$env:PAGES_SOURCE = "skills"
+
+# 2) 登录（浏览器登录；选 China 或 Global 取决于你的腾讯云账号站点）
+edgeone login --site china
+#   若报 AuthFailure.UnauthorizedOperation（账号无 Makers 权限），见下方「登录失败对策」
+
+# 3) 关联项目（自动创建）
+edgeone makers link --name ai-test-officer
+
+# 4) 拉取远端环境变量到本地 .env（供本地 dev 用，AI_GATEWAY_* 由平台注入）
+edgeone makers env pull
+
+# 5) 本地联调（后台启动 dev server）
+edgeone makers dev --name ai-test-officer
+#   浏览器打开 Makers 控制台，对 test-officer 说「跑场景 A」
+
+# 6) 发布（非交互加 --json；比赛长期链接见下方收集表）
+edgeone makers deploy -n ai-test-officer --json
+```
+
+### 免登录部署（推荐：绕过浏览器 OAuth 的 UnauthorizedOperation）
+若 `edgeone login`（浏览器 OAuth 换 token）报 `AuthFailure.UnauthorizedOperation`，可改用控制台生成的 **API Token** 直接部署，无需本地登录：
+1. 用浏览器登录 **EdgeOne Makers 控制台** → 「设置 / Settings」→「API Token」→「创建令牌」复制。
+   （若网页控制台也进不去/创建不了，说明账号本身无 Makers 权限，需主账号在 CAM 挂 `QcloudEOFullAccess` 或先开通 EdgeOne。）
+2. 直接部署：
+```bash
+$env:PAGES_SOURCE = "skills"
+edgeone makers deploy -n ai-test-officer -t <控制台创建的Token> --json
+```
+> 注：`edgeone login` 没有 `--token` 参数；Token 只用于 `edgeone makers deploy -t`，用于无头/CI 场景。
+
+### 环境变量说明
+- `AI_GATEWAY_API_KEY` / `AI_GATEWAY_BASE_URL` 由 CLI **部署时自动注入**，无需手填（前提是 `.env.example` 已声明）。
+- 引擎默认用平台内置模型网关跑「理解变更 / 根因推理」；若想用自己的模型，在控制台「项目设置 → 环境变量」里设 `OPENAI_API_KEY`/`OPENAI_BASE_URL`/`OPENAI_MODEL`（Agent 会优先映射过去）。
+- 可选集成（工蜂 MR 回写 / TAPD 直连）的 `TGIT_*` / `TAPD_*` 同样在控制台环境变量里设。
+
+### 调用约定
+- 对话：在 Makers 控制台对 Agent 说「跑场景 A / B / C」。
+- API：`POST /test-officer`，Body `{ "scenario": "A", "params": { "target": "feature/coupon-bug" } }`。平台自动注入请求头 `makers-conversation-id`（映射到 `context.conversation_id`）。
+- 零配置体验：不传 `params` 时自动套用演示分支真实跑测（非 mock）。
+
+### 预览链接时效（赛题特别说明）
+默认预览链接有访问时效；比赛期间可填 [专用链接收集表](https://doc.weixin.qq.com/forms/AJEAIQdfAAoAVMAxAZlAFoCNNs69fqmPf) 申请长期可访问链接（每周一/四处理）。也可在 EdgeOne 加自定义域名实现长期访问。
 

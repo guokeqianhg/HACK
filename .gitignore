@@ -35,6 +35,24 @@ sample-app/test-results/
 # 依赖
 node_modules/
 
+# EdgeOne Makers 构建产物 / 本地凭证（CLI 自动生成，非源码）
+.edgeone/
+
 # 本地密钥（含 LLM API Key，切勿提交）
 .env
 .env.local
+
+# Tencent Cloud EdgeOne
+.env
+.edgeone/*
+.tef_dist/*
+
+# 演示案例仓库（独立 GitHub 仓库 guokeqianhg/HACK_case，本地 clone，不纳入本仓库）
+HACK_case/
+
+# IDE / 工具生成目录与本地参考文档
+.agents/
+.codebuddy/
+skills-lock.json
+*.pdf
+  

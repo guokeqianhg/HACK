@@ -16,9 +16,40 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadEnv, isLLMEnabled, chat, fastModel, extractJSON } from './llm.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
+
+// 加载 .env（含 LLM 密钥）；未配置或 LLM_OFF=1 则巡检告警研判自动跳过，纯确定性推送不受影响。
+await loadEnv();
+
+// 轻量增强：巡检发现异常时，用 1 次快模型调用生成「告警研判」（一句影响判断 + 优先级建议）。
+// 仅在 异常 && 需推送 时触发，健康巡检 0 次 LLM——保证高频定时巡检依旧快、稳、省。
+// 失败/未启用则返回 null，推送正文回退为纯确定性内容。
+async function aiTriageSummary({ branch, summary, failItems }) {
+  if (!isLLMEnabled() || !failItems.length) return null;
+  try {
+    const failText = failItems.slice(0, 12)
+      .map((f) => `- [${f.severity}] ${f.name}｜${String(f.rootCause || '').slice(0, 120)}`)
+      .join('\n');
+    const { content, reasoning } = await chat({
+      messages: [
+        { role: 'system', content: '你是「AI 测试官」的巡检研判助手。给定一次定时巡检发现的失败用例列表，请用中文输出一个 JSON：{"impact":"一句话研判受影响的核心能力/是否疑似资损或阻断级","priority":"P0|P1|P2","advice":"一句话处置建议"}。只输出 JSON，不要多余文字。' },
+        { role: 'user', content: `分支：${branch}\n失败 ${summary.fail} / 共 ${summary.total} 项。\n失败用例：\n${failText}` },
+      ],
+      temperature: 0.2,
+      maxTokens: 900,
+      timeoutMs: 20000,
+      retryOnEmpty: false,
+      model: fastModel(),
+    });
+    const j = extractJSON(content) || extractJSON(reasoning);
+    return j && (j.impact || j.advice) ? j : null;
+  } catch {
+    return null; // 研判失败不影响告警推送
+  }
+}
 
 const args = process.argv.slice(2).reduce((m, a, i, arr) => {
   if (a.startsWith('--')) {
@@ -112,6 +143,9 @@ async function checkOnce() {
       : !prev || prev.status !== status; // 健康：仅在 异常→健康 切换时通知一次
 
   // 4) 构造企微 markdown 消息
+  // 轻量 AI 研判：仅在「异常 && 需推送」时调 1 次快模型（健康/去重跳过时不调），失败自动回退。
+  const triage = (status === 'unhealthy' && needPush) ? await aiTriageSummary({ branch, summary, failItems }) : null;
+
   const title = status === 'unhealthy'
     ? '🚨 **AI 测试官 · 场景C 异常巡检**'
     : '✅ **AI 测试官 · 场景C 巡检正常**';
@@ -122,6 +156,10 @@ async function checkOnce() {
     `> 状态：**${status === 'unhealthy' ? `🐞 发现问题（${summary.fail} 个 / 共 ${summary.total} 项验证）` : `✅ 健康（${summary.pass} 项全部符合预期）`}**`,
   ];
   if (status === 'unhealthy') {
+    if (triage) {
+      lines.push('', `**🤖 AI 研判：** ${triage.impact || ''}${triage.priority ? `（${triage.priority}）` : ''}`);
+      if (triage.advice) lines.push(`**处置建议：** ${triage.advice}`);
+    }
     lines.push('', `**AI 测试官捕获的问题（前 10）：**`);
     for (const f of failItems.slice(0, 10)) {
       lines.push(`- [${f.severity}] ${f.name}`);
@@ -129,7 +167,10 @@ async function checkOnce() {
     }
     if (failItems.length > 10) lines.push(`- …其余 ${failItems.length - 10} 项`);
     if (impact?.selectionReason) lines.push('', `**选测：** ${impact.selectionReason}`);
-    lines.push('', `**建议：** 修复后复测通过方可合入/发布。详见 report/${outName}.html`);
+    // 报告链接：配置 PUBLIC_BASE_URL 时给可点击的完整 URL（AnyDev/HTTP 部署），否则退化为相对路径
+    const publicBase = (process.env.PUBLIC_BASE_URL || '').replace(/\/+$/, '');
+    const reportLink = publicBase ? `${publicBase}/report/${outName}.html` : `report/${outName}.html`;
+    lines.push('', `**建议：** 修复后复测通过方可合入/发布。详见 ${reportLink}`);
   } else {
     lines.push('', '全部用例通过，无异常。');
   }

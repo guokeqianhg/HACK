@@ -1,0 +1,7 @@
+{
+  "buildCommand": "node -e \"0\"",
+  "outputDirectory": "web",
+  "agents": {
+    "framework": "claude-agent-sdk"
+  }
+}

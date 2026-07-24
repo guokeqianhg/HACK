@@ -21,15 +21,38 @@ import { fileURLToPath } from 'node:url';
 // ---------- 配置（惰性读取，确保 .env 在任何时刻加载都生效）----------
 function cfg() {
   return {
-    key: process.env.OPENAI_API_KEY || process.env.LLM_API_KEY || '',
-    base: (process.env.OPENAI_BASE_URL || process.env.LLM_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, ''),
-    textModel: process.env.OPENAI_MODEL || process.env.LLM_MODEL || 'kimi-k2.5',
+    // 优先级：AI_GATEWAY_*（EdgeOne 免费网关）> OPENAI_* / LLM_*（自定义端点）> 默认
+    key: process.env.AI_GATEWAY_API_KEY || process.env.OPENAI_API_KEY || process.env.LLM_API_KEY || '',
+    base: (process.env.AI_GATEWAY_BASE_URL || process.env.OPENAI_BASE_URL || process.env.LLM_BASE_URL || 'https://ai-gateway.edgeone.link').replace(/\/$/, ''),
+    textModel: process.env.AI_GATEWAY_MODEL || process.env.OPENAI_MODEL || process.env.LLM_MODEL || '@makers/kimi-k2.6',
     // 快模型（判定类任务：语义理解 / 覆盖度 / 需求审计 / 自适应旁白），缺省回退到文本推理模型
-    fastModel: process.env.LLM_FAST_MODEL || process.env.OPENAI_FAST_MODEL || '',
+    fastModel: process.env.AI_GATEWAY_SMALL_MODEL || process.env.LLM_FAST_MODEL || process.env.OPENAI_FAST_MODEL || '',
   };
 }
 
+function chatCompletionUrls(base) {
+  const cleaned = String(base || '').replace(/\/$/, '');
+  if (/\/chat\/completions$/i.test(cleaned)) return [cleaned];
+
+  const direct = `${cleaned}/chat/completions`;
+  const aiGatewayBase = String(process.env.AI_GATEWAY_BASE_URL || '').replace(/\/$/, '');
+  if (cleaned !== aiGatewayBase) return [direct];
+
+  try {
+    const u = new URL(cleaned);
+    const pathname = (u.pathname || '').replace(/\/$/, '');
+    const needsV1 = u.hostname === 'ai-gateway.edgeone.link' && !/\/v1$/i.test(pathname);
+    return needsV1 ? [`${cleaned}/v1/chat/completions`, direct] : [direct];
+  } catch {
+    return [direct];
+  }
+}
+
 export function isLLMEnabled() {
+
+  // 显式离线开关：LLM_OFF=1 时强制关闭 AI 语义层（即使 .env 里配了 Key），
+  // 用于离线演示 / 快速验证链路（引擎全回退确定性逻辑，秒级出结果）。
+  if (process.env.LLM_OFF === '1') return false;
   return !!cfg().key;
 }
 
@@ -79,42 +102,98 @@ export let _llmStats = { calls: 0, ms: 0 };
  * 调用 LLM（OpenAI 兼容）。messages 为完整消息数组（可含 system/tool 角色）。
  * @returns {{content:string, toolCalls:Array, reasoning:string, raw:object}}
  */
-export async function chat({ messages, tools = null, temperature = 0.2, maxTokens = 1200, model = null, retries = 2, stats = true } = {}) {
+// 单次调用超时（毫秒）。慢代理下 30s 足够；超过基本是卡住，早失败早回退比干等 60s 更好。
+// 可用 LLM_TIMEOUT_MS 覆盖。
+const LLM_TIMEOUT_MS = Number(process.env.LLM_TIMEOUT_MS || 30000);
+// 推理模型（CoT）会先输出 reasoning_content 再写 content；若 max_tokens 太小，
+// 额度会被推理耗光导致 content 为空。这里对「需要正式答案」的调用设下限，给推理+答案都留空间。
+const MIN_TOKENS_FOR_ANSWER = Number(process.env.LLM_MIN_TOKENS || 800);
+
+export async function chat({ messages, tools = null, temperature = 0.2, maxTokens = 1200, model = null, retries = 2, stats = true, minAnswerTokens = MIN_TOKENS_FOR_ANSWER, retryOnEmpty = true, timeoutMs = LLM_TIMEOUT_MS } = {}) {
   const { key, base, textModel } = cfg();
   if (!key) throw new Error('LLM API Key 未配置');
   const m = model || textModel;
-  const url = `${base}/chat/completions`;
-  const body = { model: m, temperature, max_tokens: maxTokens, messages };
-  if (tools && tools.length) body.tools = tools;
+  const urls = chatCompletionUrls(base);
+  // 「稳」：给推理模型的 max_tokens 兜底下限，避免推理吃光额度、content 返回空。
+
+  // 只在原值低于下限时抬高（尊重调用方主动设的更大值）；预热等纯探活可传 minAnswerTokens:0 豁免。
+  const effMaxTokens = Math.max(maxTokens, minAnswerTokens);
+  // kimi-k2.6 等推理模型要求 temperature=1（否则 Gateway 报 400）。
+  // 自动修正：模型名含 kimi 且原值非 1 时抬到 1，避免每个调用方都得感知。
+  const effTemp = /kimi/i.test(m) && temperature !== 1 ? 1 : temperature;
   const t0 = Date.now();
 
-  let lastErr;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
+  // 内部单发（一次网络请求 + 超时控制）。抽出来便于「空 content 抬额度重试」复用。
+  const once = async (tokens) => {
+    const body = { model: m, temperature: effTemp, max_tokens: tokens, messages };
+    if (tools && tools.length) body.tools = tools;
+    for (let i = 0; i < urls.length; i++) {
       const ctrl = new AbortController();
-      const to = setTimeout(() => ctrl.abort(), 60000);
-      let res;
+      const to = setTimeout(() => ctrl.abort(), timeoutMs);
       try {
-        res = await fetch(url, {
+        const res = await fetch(urls[i], {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
           body: JSON.stringify(body),
           signal: ctrl.signal,
         });
+        if (res.status === 404 && i < urls.length - 1) {
+          const text = await res.text().catch(() => '');
+          if (/invalid request path/i.test(text)) continue;
+        }
+        return res;
       } finally {
         clearTimeout(to);
       }
+    }
+    throw new Error('LLM endpoint 不可用');
+  };
+
+
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      let res = await once(effMaxTokens);
       if (!res.ok) {
         const text = await res.text().catch(() => '');
-        if (res.status >= 500 && attempt < retries) {
-          await sleep(400 * (attempt + 1));
+        // 429（限流）与 5xx（服务端瞬时错误）都做退避重试。
+        // 429 退避更久（限流是速率问题，需要等窗口滑动），避免直接失败回退成确定性逻辑。
+        if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+          const backoff = res.status === 429 ? 2500 * (attempt + 1) : 400 * (attempt + 1);
+          await sleep(backoff);
           continue;
         }
         throw new Error(`LLM HTTP ${res.status}: ${text.slice(0, 300)}`);
       }
-      const data = await res.json();
-      const msg = data?.choices?.[0]?.message || {};
+      let data = await res.json();
+      let msg = data?.choices?.[0]?.message || {};
+      let finish = data?.choices?.[0]?.finish_reason;
+      let contentText = flattenLLMText(msg.content);
+      let reasoningText = flattenLLMText(msg.reasoning_content);
+
+      // 「稳」：content 为空但存在推理（且未用工具）→ 说明额度被 CoT 吃光被 length 截断，
+      // 抬高 max_tokens 立即重试一次把正式答案挤出来。
+      // 注意：重试会再花一次调用耗时；对「可选增强类」调用（如语义理解）应传 retryOnEmpty:false，
+      // 宁可放弃该次结果回退确定性，也不要为纯展示信息double 等待。
+      if (retryOnEmpty && !contentText && reasoningText && finish === 'length' && (!msg.tool_calls || !msg.tool_calls.length)) {
+        const bumped = Math.min(effMaxTokens * 2 + 512, 8000);
+        const res2 = await once(bumped);
+        if (res2.ok) {
+          const data2 = await res2.json();
+          const msg2 = data2?.choices?.[0]?.message || {};
+          const contentText2 = flattenLLMText(msg2.content);
+          if (contentText2) {
+            data = data2;
+            msg = msg2;
+            finish = data2?.choices?.[0]?.finish_reason;
+            contentText = contentText2;
+            reasoningText = flattenLLMText(msg2.reasoning_content);
+          }
+        }
+      }
+
       const toolCalls = Array.isArray(msg.tool_calls)
+
         ? msg.tool_calls.map((tc) => ({
             id: tc.id,
             name: tc.function?.name,
@@ -127,11 +206,12 @@ export async function chat({ messages, tools = null, temperature = 0.2, maxToken
         console.error(`[llm-debug] model=${m} ms=${Date.now() - t0}`);
       }
       return {
-        content: msg.content || '',
+        content: contentText,
         toolCalls,
-        reasoning: msg.reasoning_content || '',
+        reasoning: reasoningText,
         raw: data,
       };
+
     } catch (e) {
       lastErr = e;
       if (attempt < retries) await sleep(400 * (attempt + 1));
@@ -166,27 +246,82 @@ function safeParseJSON(s) {
   }
 }
 
+function flattenLLMText(value, depth = 0) {
+  if (value == null || depth > 6) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    return value.map((item) => flattenLLMText(item, depth + 1)).filter(Boolean).join('\n').trim();
+  }
+  if (typeof value !== 'object') return '';
+
+  for (const key of ['text', 'content', 'value', 'output_text', 'reasoning_content']) {
+    const text = flattenLLMText(value[key], depth + 1);
+    if (text) return text;
+  }
+  return Object.values(value).map((item) => flattenLLMText(item, depth + 1)).filter(Boolean).join('\n').trim();
+}
+
+function normalizeJsonCandidate(text) {
+  return String(text || '')
+    .replace(/^﻿/, '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
+}
+
+function minimallyRepairJSON(text) {
+  return String(text || '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/,\s*([}\]])/g, '$1')
+    .trim();
+}
+
+function tryParseJSONCandidate(text) {
+  const normalized = normalizeJsonCandidate(text);
+  if (!normalized) return null;
+  for (const candidate of [normalized, minimallyRepairJSON(normalized)]) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // 继续尝试下一个候选
+    }
+  }
+  return null;
+}
+
 /**
- * 从模型文本中鲁棒抽取 JSON（兼容模型多嘴前后缀、markdown 围栏、
- * 以及答案写在 reasoning_content 里、且其中又引用了带括号的证据导致"首个括号"误切的情况）。
- * 策略：从【最后一个】[ 或 { 出发，做括号平衡匹配，取匹配到的完整片段——
- * 因为模型通常在推理/解释之后才输出最终 JSON，最后一个定界符最可能是答案起点。
+ * 从模型文本中鲁棒抽取 JSON（兼容多嘴前后缀、markdown 围栏、
+ * reasoning 通道、数组/对象分片内容，以及轻微格式噪声如智能引号、尾逗号）。
+ * 策略：优先直接解析与 fenced JSON；若仍失败，再扫描所有平衡的 { } / [ ] 片段，
+ * 返回其中可解析且最长的结构化结果。
  * @returns {object|Array|null}
  */
 export function extractJSON(text) {
   if (!text) return null;
-  let t = String(text).trim();
-  // 去掉可能出现的 markdown 代码围栏（```json ... ```）
-  t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
-  // 整段直接解析（模型偶尔会干净地只输出 JSON）
-  try { return JSON.parse(t); } catch { /* ignore */ }
-  // 扫描所有平衡的 { } / [ ] 片段（尊重字符串与转义），返回「能解析的最大片段」：
-  // 顶层容器通常最大，且对象会包住内部数组，因此对象优先于其内嵌数组被选中。
+  const raw = flattenLLMText(text);
+  if (!raw) return null;
+
+  const direct = tryParseJSONCandidate(raw);
+  if (direct !== null) return direct;
+
+  const fenced = [...String(raw).matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for (const match of fenced) {
+    const parsed = tryParseJSONCandidate(match[1]);
+    if (parsed !== null) return parsed;
+  }
+
   const spans = [];
+  const scanText = String(raw);
   const scan = (open, close) => {
-    let inStr = false, esc = false, depth = 0, start = -1;
-    for (let j = 0; j < t.length; j++) {
-      const ch = t[j];
+    let inStr = false;
+    let esc = false;
+    let depth = 0;
+    let start = -1;
+    for (let j = 0; j < scanText.length; j++) {
+      const ch = scanText[j];
       if (inStr) {
         if (esc) esc = false;
         else if (ch === '\\') esc = true;
@@ -200,7 +335,7 @@ export function extractJSON(text) {
       } else if (ch === close) {
         depth--;
         if (depth === 0 && start >= 0) {
-          spans.push(t.slice(start, j + 1));
+          spans.push(scanText.slice(start, j + 1));
           start = -1;
         }
       }
@@ -208,12 +343,12 @@ export function extractJSON(text) {
   };
   scan('{', '}');
   scan('[', ']');
+
   let best = null;
   for (const s of spans) {
-    try {
-      const v = JSON.parse(s);
-      if (!best || s.length > best.len) best = { val: v, len: s.length };
-    } catch { /* 该片段非法，跳过 */ }
+    const parsed = tryParseJSONCandidate(s);
+    if (parsed !== null && (!best || s.length > best.len)) best = { val: parsed, len: s.length };
   }
   return best ? best.val : null;
 }
+

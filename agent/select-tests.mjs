@@ -12,7 +12,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { globSync } from 'node:fs';
+import { globSync } from './glob-shim.mjs'; // 兼容垫片：Node<22 也能用 glob
 
 const TEST_RE = /\.(test|spec)\.[mc]?js$/;
 // 本执行引擎用 `node --test` 跑测，只认 node 原生测试文件（*.test.js / *-test.js / test-*.js）。
@@ -139,8 +139,10 @@ export function expandTests(repoDir, testFiles, alreadyRun = [], limit = 40) {
 const BROAD_IMPACT = /(^|\/)(tsconfig.*\.json|jsconfig\.json|jest\.config.*|vitest\.config.*|vite\.config.*|webpack.*|rollup.*|esbuild.*|babel\.config.*|Makefile|Dockerfile|\.github[\\/].*|\.gitlab-ci\.yml|build\.(js|sh|ps1))$/i;
 
 // changedFiles: 来自 git diff，路径相对于 git 仓库根（可能含 SUT 子目录前缀）
-// repoDir: 实际被测目录（绝对）；gitRoot: git 仓库根（绝对）
-export function selectTests({ repoDir, gitRoot, changedFiles }) {
+// repoDir: 实际被测目录（绝对）；gitRoot: git 仓库根（绝对，可选旧式入参）
+// repoRel: SUT 相对 git 根的前缀（推荐：由调用方用 git rev-parse --show-prefix 算好传入，
+//   规避 Windows 8.3 短名路径与 git 长名路径字符串相对化失败的问题）；不传则回退旧逻辑。
+export function selectTests({ repoDir, gitRoot, changedFiles, repoRel: repoRelOpt }) {
   // 可运行全集：仅 node --test 能跑的文件（排除 *.spec.js 等需独立 runner 的框架文件）
   // 复用 buildImportGraph 已扫描的全仓库文件清单，避免重复全量扫描
   const { files, rev } = buildImportGraph(repoDir);
@@ -149,7 +151,7 @@ export function selectTests({ repoDir, gitRoot, changedFiles }) {
     return { testFiles: runnable, narrowed: false, reason: '无改动（全量回归）' };
   }
 
-  const repoRel = path.relative(gitRoot, repoDir); // SUT 相对 git 根，可能为空
+  const repoRel = repoRelOpt !== undefined ? repoRelOpt : path.relative(gitRoot, repoDir); // SUT 相对 git 根，可能为空
   const inSut = (f) => {
     const rel = path.relative(repoRel, f);
     return rel.startsWith('..') ? null : path.resolve(repoDir, rel);
