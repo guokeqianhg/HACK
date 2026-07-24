@@ -395,8 +395,6 @@
 <body>
 <canvas id="bg"></canvas>
 <div class="grain"></div>
-<div class="pattern"></div>
-<div class="watermark">测</div>
 
 <div class="wrap">
   <nav>
@@ -469,7 +467,7 @@
 
     <p class="noteWarn">
       <i data-lucide="alert-triangle"></i>
-      <span>仓库需<b>公开可 clone</b>（内网/私有仓库沙箱访问不到）；被测项目建议为可 <code>node --test</code> 的 Node 仓库。真实跑测通常需数十秒~一两分钟。</span>
+      <span>仓库需<b>公开可 clone</b>（内网/私有仓库沙箱访问不到）；被测项目建议为可 <code>node --test</code> 的 Node 仓库。真实跑测通常需一分钟~三分钟。</span>
     </p>
   </section>
 
@@ -782,6 +780,39 @@ function collectParams() {
   return p;
 }
 
+/* ── 错误分类翻译：碰到什么错就显示什么错的专属说明，不用大杂烩提示 ── */
+const ERR_COPY = {
+  github: '受跨境网络波动影响，沙箱暂时无法访问 GitHub 拉取代码。\n这是暂时性问题，系统已自动重试 3 次仍未成功，请稍等片刻再点「开始运行」重试。',
+  quota: '云沙箱本月免费额度（GB-秒）已用尽，暂时无法创建运行环境。\n请等待下月配额自动重置，或在 EdgeOne 控制台提升沙箱配额后重试。',
+  timeout504: '云函数执行超时（HTTP 504）。\n本次运行超过了平台单次请求的时限，属于平台网关限制，与测试结果无关，请稍后重试。',
+  auth401: '访问链接已过期或无权访问（HTTP 401）。\n请改用最新的长期访问链接打开页面。',
+  offline: '无法连接到测试服务。\n请确认你正在通过已部署的服务地址访问页面（而不是直接双击打开本地文件），或当前网络异常，稍后重试。',
+};
+
+// 后端 JSON 里的错误文字 → 友好文案（识别不出则返回 null，展示原文）
+function classifyBackendError(msg) {
+  const m = String(msg || '');
+  if (/SANDBOX_LIMIT_EXCEEDED|LimitExceeded|quota\s*exceeded|GB-秒|沙箱.{0,6}额度/i.test(m)) return ERR_COPY.quota;
+  if (/克隆|clone/i.test(m) && /失败|failed|error|could not|unable|GnuTLS/i.test(m)) return ERR_COPY.github;
+  return null;
+}
+
+function showFriendlyError(text) {
+  rStatus.className = 'status bad';
+  rStatus.textContent = '调用失败';
+  rBody.innerHTML = `<div class="blocking">${escHtml(text)}</div>`;
+  rActs.style.display = 'none';
+}
+
+// 网关/HTTP 层错误（响应不是 JSON）按状态码分类
+function showHttpError(status, raw) {
+  if (status === 504) return showFriendlyError(ERR_COPY.timeout504);
+  if (status === 401) return showFriendlyError(ERR_COPY.auth401);
+  if (!status) return showFriendlyError(ERR_COPY.offline);
+  const excerpt = String(raw || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+  showFriendlyError(`服务暂时不可用（HTTP ${status}），请稍后重试。` + (excerpt ? `\n响应摘录：${excerpt}` : ''));
+}
+
 async function run() {
   running = true;
   runBtn.disabled = true;
@@ -791,7 +822,7 @@ async function run() {
   rTitle.textContent = `场景 ${scenario} 运行结果`;
   rStatus.className = 'status run';
   rStatus.innerHTML = '<span class="spinner"></span> 沙箱克隆 + 真实跑测中…';
-  rBody.innerHTML = '<div class="runHint">正在执行：git clone → AI 语义理解 → 精准选测 → 真实跑测 → 生成报告（通常数十秒~一两分钟）</div>';
+  rBody.innerHTML = '<div class="runHint">正在执行：git clone → AI 语义理解 → 精准选测 → 真实跑测 → 生成报告（通常一分钟~三分钟）</div>';
   rActs.style.display = 'none';
   rLog.className = 'logbox'; rLog.textContent = '';
   closeModal(); rModalFrame.removeAttribute('srcdoc');
@@ -803,21 +834,16 @@ async function run() {
       headers: { 'content-type': 'application/json', 'makers-conversation-id': convId() },
       body: JSON.stringify({ scenario, params }),
     });
-    // 先按文本读取再手动解析：网关错误页（401/502/超时）返回的是 HTML，
-    // 直接 resp.json() 在 Safari 里会抛 "The string did not match the expected pattern"，
-    // 看不出真实原因。这里把 HTTP 状态和原始内容透出，便于定位。
+    // 先按文本读取再手动解析：网关错误页（401/504/超时）返回的是 HTML 而非 JSON，
+    // 直接 resp.json() 在 Safari 里会抛 "The string did not match the expected pattern"。
+    // 解析失败按 HTTP 状态码分类给出具体原因，不再用大杂烩提示。
     const text = await resp.text();
-    let data;
-    try { data = JSON.parse(text); }
-    catch {
-      throw new Error(`服务端未返回 JSON（HTTP ${resp.status}）。` +
-        (text ? '响应摘录：' + text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160) : '响应为空。'));
-    }
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* 非 JSON：网关错误页 */ }
+    if (!data) { showHttpError(resp.status, text); return; }
     render(data);
   } catch (err) {
-    rStatus.className = 'status bad';
-    rStatus.textContent = '调用失败';
-    rBody.innerHTML = `<div class="blocking">请求 /test-officer 失败：${escHtml(String(err && err.message || err))}\n若在本地打开静态文件会失败，请通过已部署的服务地址访问；临时签名链接过期也会报 401，请改用长期链接。</div>`;
+    showHttpError(0, '');
   } finally {
     running = false;
     runBtn.disabled = false;
@@ -839,9 +865,11 @@ function countUp(el, target, dur) {
 
 function render(data) {
   if (!data || data.ok === false) {
+    const rawErr = (data && (data.error || data.hint)) || '未知错误';
     rStatus.className = 'status bad';
     rStatus.textContent = '执行失败';
-    rBody.innerHTML = `<div class="blocking">${escHtml((data && (data.error || data.hint)) || '未知错误')}</div>`;
+    // 后端错误（克隆失败/沙箱额度等）翻译成评委能看懂的专属说明；识别不出则展示原文
+    rBody.innerHTML = `<div class="blocking">${escHtml(classifyBackendError(rawErr) || rawErr)}</div>`;
     showLog(data);
     rActs.style.display = 'flex'; btnReport.style.display = 'none';
     refreshIcons();
