@@ -232,7 +232,10 @@
 <body>
 <div class="wrap">
   <header>
-    <span class="badge"><span class="dot"></span>方向二 · AI 测试官</span>
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+      <span class="badge"><span class="dot"></span>方向二 · AI 测试官</span>
+      <a class="badge" href="/usage.html" style="text-decoration:none">📖 使用说明</a>
+    </div>
     <h1>全链路自动化测试 <span class="grad">Agent</span></h1>
     <p class="lead">
       给一个 <b>公开 git 仓库地址 + 分支</b>，Agent 会在云沙箱里真实执行
@@ -591,11 +594,21 @@ async function run() {
       headers: { 'content-type': 'application/json', 'makers-conversation-id': convId() },
       body: JSON.stringify({ scenario, params }),
     });
-    render(await resp.json());
+    // 先按文本读取再手动解析：网关错误页（401/502/超时）返回的是 HTML，
+    // 直接 resp.json() 在 Safari 里会抛 "The string did not match the expected pattern"，
+    // 看不出真实原因。这里把 HTTP 状态和原始内容透出，便于定位。
+    const text = await resp.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch {
+      throw new Error(`服务端未返回 JSON（HTTP ${resp.status}）。` +
+        (text ? '响应摘录：' + text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160) : '响应为空。'));
+    }
+    render(data);
   } catch (err) {
     rStatus.className = 'status bad';
     rStatus.textContent = '调用失败';
-    rBody.innerHTML = `<div class="blocking">请求 /test-officer 失败：${escHtml(String(err))}\n若在本地打开静态文件会失败，请通过已部署的服务地址访问。</div>`;
+    rBody.innerHTML = `<div class="blocking">请求 /test-officer 失败：${escHtml(String(err && err.message || err))}\n若在本地打开静态文件会失败，请通过已部署的服务地址访问；临时签名链接过期也会报 401，请改用长期链接。</div>`;
   } finally {
     running = false;
     runBtn.disabled = false;
