@@ -40,11 +40,11 @@ const branchFailures = data.branchFailures || [];
 const conflictAnalysis = data.conflictAnalysis || null;
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-const sevColor = { high: '#d6455a', medium: '#b87708', low: '#0e9f6e' };
+const sevColor = { high: '#b03427', medium: '#a86e08', low: '#4d7c5b' };
 const statusBadge = { pass: '✅ PASS', fail: '❌ FAIL', skip: '⏭ SKIP' };
 const statusClass = { pass: 'ok', fail: 'err', skip: 'muted' };
 const passPct = summary.total ? Math.round((summary.pass / summary.total) * 100) : 0;
-const ringColor = (summary.fail || 0) > 0 ? '#d6455a' : '#0e9f6e';
+const ringColor = (summary.fail || 0) > 0 ? '#b03427' : '#4d7c5b';
 
 // ---------- 结论横幅：消除"通过/失败"数字的歧义 ----------
 // 背景：单纯展示「12 通过 / 8 失败」容易被误读为"AI 测试官只做对了 12 件事、搞砸了 8 件"，
@@ -156,16 +156,16 @@ const html = `<!DOCTYPE html>
 <title>${esc(meta.title || 'AI 测试官报告')}</title>
 <style>
   :root{
-    --bg:#f5f6fa;--panel:#ffffff;--panel2:#f7f8fc;--line:#e3e7f2;--txt:#182238;--sub:#5c6b8c;--dim:#8b96b3;
-    --accent:#4f6ef7;--accent-d:#3a58d6;--accent2:#7a5af5;--ok:#0e9f6e;--warn:#b87708;--err:#d6455a;
+    --bg:#f6f2e9;--panel:#fffdf8;--panel2:#f3eee1;--line:#e5ddcc;--txt:#211c14;--sub:#6d6350;--dim:#a3987f;
+    --accent:#b5432a;--accent-d:#96351f;--accent2:#c08a1e;--ok:#4d7c5b;--warn:#a86e08;--err:#b03427;
   }
   *{box-sizing:border-box}
-  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;background:linear-gradient(180deg,#f8f9fd 0%,var(--bg) 60%);color:var(--txt);min-height:100vh;line-height:1.5}
+  body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;background:linear-gradient(180deg,#faf7f0 0%,var(--bg) 60%);color:var(--txt);min-height:100vh;line-height:1.5}
   a{color:var(--accent);text-decoration:none}
   a:hover{text-decoration:underline}
-  header{padding:24px 32px 20px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.85);backdrop-filter:blur(8px);position:sticky;top:0;z-index:10}
+  header{padding:24px 32px 20px;border-bottom:1px solid var(--line);background:rgba(255,253,248,.88);backdrop-filter:blur(8px);position:sticky;top:0;z-index:10}
   header .htop{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
-  header h1{margin:0;font-size:21px;font-weight:800;letter-spacing:.2px;color:var(--txt)}
+  header h1{margin:0;font-family:Georgia,"Songti SC","STSong","SimSun",serif;font-size:23px;font-weight:800;letter-spacing:.2px;color:var(--txt)}
   .metachips{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
   .chip{font-size:12px;padding:4px 11px;border-radius:20px;background:var(--panel2);border:1px solid var(--line);color:var(--sub)}
   .chip b{color:var(--txt);font-weight:600}
@@ -173,19 +173,19 @@ const html = `<!DOCTYPE html>
   nav.quicknav a{color:var(--sub);padding:2px 0;border-bottom:2px solid transparent}
   nav.quicknav a:hover{color:var(--accent);border-color:var(--accent);text-decoration:none}
   main{max-width:1120px;margin:0 auto;padding:28px 32px 70px;display:grid;gap:20px}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;box-shadow:0 1px 2px rgba(24,34,56,.04),0 8px 24px rgba(24,34,56,.05)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px 22px;box-shadow:0 1px 2px rgba(42,34,20,.04),0 8px 24px rgba(42,34,20,.05)}
   .card h2{margin:0 0 16px;font-size:15.5px;font-weight:700;display:flex;align-items:center;gap:8px;color:var(--txt)}
   .card h2 .icon{font-size:16px}
   .card > p.hint{font-size:12px;color:var(--sub);margin:10px 0 0}
 
   /* 顶部统计 */
   .statsrow{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
-  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;text-align:center;box-shadow:0 1px 2px rgba(24,34,56,.04)}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;text-align:center;box-shadow:0 1px 2px rgba(42,34,20,.04)}
   .stat b{display:block;font-size:28px;font-weight:800;margin-bottom:2px}
   .stat.total b{color:var(--txt)}.stat.pass b{color:var(--ok)}.stat.fail b{color:var(--err)}
   .stat span.label{font-size:12px;color:var(--sub)}
   .ringstat{display:flex;align-items:center;justify-content:center;gap:14px}
-  .ring{width:66px;height:66px;border-radius:50%;background:conic-gradient(${ringColor} calc(var(--pct) * 1%), #e6eaf4 0);display:flex;align-items:center;justify-content:center;position:relative;flex-shrink:0}
+  .ring{width:66px;height:66px;border-radius:50%;background:conic-gradient(${ringColor} calc(var(--pct) * 1%), #e9e2d2 0);display:flex;align-items:center;justify-content:center;position:relative;flex-shrink:0}
   .ring::before{content:'';position:absolute;inset:6px;border-radius:50%;background:var(--panel)}
   .ring b{position:relative;z-index:1;font-size:15px}
   .ringstat .rlabel{text-align:left;font-size:12px;color:var(--sub)}
@@ -197,8 +197,8 @@ const html = `<!DOCTYPE html>
   .step:last-child{padding-bottom:0}
   .step::before{content:'';position:absolute;left:12px;top:26px;bottom:0;width:2px;background:var(--line)}
   .step:last-child::before{display:none}
-  .node{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;z-index:1;border:2px solid var(--ok);background:rgba(14,159,110,.10);color:var(--ok)}
-  .step.warn .node{border-color:var(--warn);background:rgba(184,119,8,.10);color:var(--warn)}
+  .node{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;z-index:1;border:2px solid var(--ok);background:rgba(77,124,91,.10);color:var(--ok)}
+  .step.warn .node{border-color:var(--warn);background:rgba(168,110,8,.10);color:var(--warn)}
   .step .title{font-weight:700;font-size:13.5px;color:var(--txt)}
   .step .detail{font-size:12.5px;color:var(--sub);margin-top:4px;word-break:break-word}
 
@@ -214,21 +214,21 @@ const html = `<!DOCTYPE html>
   th,td{padding:10px 12px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
   th{background:var(--panel2);color:var(--sub);font-weight:600;font-size:11.5px;letter-spacing:.3px;position:sticky;top:0;white-space:nowrap}
   tbody tr{transition:background .12s}
-  tbody tr:hover{background:rgba(79,110,247,.05)}
+  tbody tr:hover{background:rgba(181,67,42,.05)}
   tbody tr:last-child td{border-bottom:none}
   .row-err{border-left:3px solid var(--err)}
   .row-warn{border-left:3px solid var(--warn)}
   .row-ok{border-left:3px solid var(--ok)}
-  .rootcause{max-width:360px;color:#3a4a6b;font-size:13px;line-height:1.65}
-  .row-err .rootcause{color:#a32c3e}
-  code{background:#eef1f8;padding:2px 7px;border-radius:5px;font-size:12px;color:#3a4a6b;border:1px solid var(--line)}
+  .rootcause{max-width:360px;color:#5d5240;font-size:13px;line-height:1.65}
+  .row-err .rootcause{color:#8c2a1d}
+  code{background:#f3eee1;padding:2px 7px;border-radius:5px;font-size:12px;color:#4a3d22;font-weight:600;border:1px solid var(--line)}
 
   /* 徽章 */
   .badge{display:inline-flex;align-items:center;font-size:12px;font-weight:700;padding:3px 10px;border-radius:20px;white-space:nowrap}
-  .badge-ok{background:rgba(14,159,110,.12);color:var(--ok)}
-  .badge-err{background:rgba(214,69,90,.12);color:var(--err)}
-  .badge-warn{background:rgba(184,119,8,.12);color:var(--warn)}
-  .badge-accent{background:rgba(79,110,247,.12);color:var(--accent)}
+  .badge-ok{background:rgba(77,124,91,.12);color:var(--ok)}
+  .badge-err{background:rgba(176,52,39,.12);color:var(--err)}
+  .badge-warn{background:rgba(168,110,8,.12);color:var(--warn)}
+  .badge-accent{background:rgba(181,67,42,.12);color:var(--accent)}
   .badge-muted{background:var(--panel2);color:var(--sub)}
   .sev{font-weight:700;font-size:12.5px;white-space:nowrap}
   .muted-text{color:var(--sub)}
@@ -248,9 +248,9 @@ const html = `<!DOCTYPE html>
   .reacttrace summary{cursor:pointer;font-weight:600;font-size:13px;color:var(--accent)}
   .reacttrace ul{margin-top:10px;display:flex;flex-direction:column;gap:6px}
   .reacttrace li{border-bottom:none;padding:8px 10px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;font-size:12.5px;color:var(--sub)}
-  .reacttrace li.trace-think{border-left:3px solid var(--accent2);color:#5b4fc4}
+  .reacttrace li.trace-think{border-left:3px solid var(--accent2);color:#8a6a1c}
   .reacttrace li.trace-act{border-left:3px solid var(--accent);color:var(--accent-d)}
-  .reacttrace li.trace-answer{border-left:3px solid var(--ok);color:#0a7a55}
+  .reacttrace li.trace-answer{border-left:3px solid var(--ok);color:#3f6b4c}
   .ticon{margin-right:4px}
   .targs{color:var(--dim)}
 
@@ -258,7 +258,7 @@ const html = `<!DOCTYPE html>
   .aigap{font-size:11.5px;color:var(--err);margin-top:2px}
 
   /* AI 语义理解高亮区（比赛核心能力，突出展示） */
-  .aiunderstand{background:linear-gradient(135deg,rgba(79,110,247,.08),rgba(122,90,245,.05));border:1px solid rgba(79,110,247,.28);border-radius:12px;padding:14px 18px;margin-bottom:16px}
+  .aiunderstand{background:linear-gradient(135deg,rgba(181,67,42,.08),rgba(209,145,43,.05));border:1px solid rgba(181,67,42,.28);border-radius:12px;padding:14px 18px;margin-bottom:16px}
   .aiheader{display:flex;align-items:center;gap:8px;margin-bottom:12px;font-size:13px;font-weight:700;color:var(--accent-d)}
   .aiicon{font-size:16px}
   .aigrid{display:grid;gap:8px}
@@ -266,9 +266,9 @@ const html = `<!DOCTYPE html>
   .ailabel{color:var(--sub);font-weight:600;flex-shrink:0}
   .aival{color:var(--txt)}
   .riskbadge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:11px;font-weight:800}
-  .risk-high{background:rgba(214,69,90,.14);color:var(--err)}
-  .risk-medium{background:rgba(184,119,8,.14);color:var(--warn)}
-  .risk-low{background:rgba(14,159,110,.14);color:var(--ok)}
+  .risk-high{background:rgba(176,52,39,.14);color:var(--err)}
+  .risk-medium{background:rgba(168,110,8,.14);color:var(--warn)}
+  .risk-low{background:rgba(77,124,91,.14);color:var(--ok)}
   .impactrow{display:flex;gap:12px;font-size:12.5px;margin-bottom:10px;align-items:flex-start}
   .impactrow b{color:var(--sub);min-width:80px;flex-shrink:0;padding-top:2px}
   .impactrow div{flex:1}
@@ -278,17 +278,17 @@ const html = `<!DOCTYPE html>
 
   /* 结论横幅：一句话消除"通过/失败"数字歧义 */
   .verdict{border-radius:14px;padding:18px 22px;display:flex;gap:16px;align-items:flex-start;border:1px solid var(--line)}
-  .verdict.bad{background:linear-gradient(135deg,rgba(214,69,90,.08),rgba(184,119,8,.05));border-color:rgba(214,69,90,.35)}
-  .verdict.good{background:linear-gradient(135deg,rgba(14,159,110,.08),rgba(79,110,247,.05));border-color:rgba(14,159,110,.35)}
+  .verdict.bad{background:linear-gradient(135deg,rgba(176,52,39,.08),rgba(168,110,8,.05));border-color:rgba(176,52,39,.35)}
+  .verdict.good{background:linear-gradient(135deg,rgba(77,124,91,.08),rgba(181,67,42,.05));border-color:rgba(77,124,91,.35)}
   .verdict .vicon{font-size:26px;line-height:1;flex-shrink:0;margin-top:1px}
   .verdict .vtitle{font-size:16.5px;font-weight:800;color:var(--txt);margin-bottom:6px}
-  .verdict .vsub{font-size:13px;color:#4a5878;line-height:1.8}
+  .verdict .vsub{font-size:13px;color:#5d5240;line-height:1.8}
   .verdict .vsub b{color:var(--txt)}
   .stat .sublabel{font-size:10.5px;color:var(--sub);opacity:.85;margin-top:2px;display:block}
 
   /* 合并冲突分析卡片（场景 E 的 AI 根因） */
-  .conflictaia{background:linear-gradient(135deg,rgba(214,69,90,.06),rgba(184,119,8,.05));border:1px solid rgba(214,69,90,.25);border-radius:12px;padding:14px 18px;margin-bottom:14px}
-  .conflictaia .aiheader{color:#b03045}
+  .conflictaia{background:linear-gradient(135deg,rgba(176,52,39,.06),rgba(168,110,8,.05));border:1px solid rgba(176,52,39,.25);border-radius:12px;padding:14px 18px;margin-bottom:14px}
+  .conflictaia .aiheader{color:#8c2a1d}
   .conflictitem{background:#fff;border:1px solid var(--line);border-radius:10px;padding:12px 16px;margin-bottom:10px;font-size:12.5px}
   .conflictitem:last-child{margin-bottom:0}
   .conflictitem .cfile{color:var(--accent);font-weight:600;font-family:monospace;margin-bottom:6px}

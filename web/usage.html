@@ -6,24 +6,25 @@
 <title>使用说明 · AI 测试官</title>
 <style>
   :root {
-    --bg: #f5f6fa;
-    --panel: #ffffff;
-    --line: #e3e7f2;
-    --line2: #c9d2e6;
-    --txt: #182238;
-    --sub: #5c6b8c;
-    --dim: #8b96b3;
-    --accent: #4f6ef7;
-    --accent-d: #3a58d6;
-    --accent-soft: rgba(79,110,247,.09);
-    --ok: #0e9f6e;
-    --ok-soft: rgba(14,159,110,.10);
-    --warn: #b87708;
-    --warn-soft: rgba(217,138,6,.09);
-    --bad: #d6455a;
-    --bad-soft: rgba(214,69,90,.09);
-    --shadow: 0 1px 2px rgba(24,34,56,.04), 0 10px 28px rgba(24,34,56,.07);
+    --bg: #f6f2e9;
+    --panel: rgba(255,253,248,.75);
+    --line: rgba(42,34,20,.10);
+    --line2: rgba(42,34,20,.22);
+    --txt: #211c14;
+    --sub: #6d6350;
+    --dim: #a3987f;
+    --accent: #b5432a;
+    --accent-d: #96351f;
+    --accent-soft: rgba(181,67,42,.08);
+    --ok: #4d7c5b;
+    --ok-soft: rgba(77,124,91,.10);
+    --warn: #a86e08;
+    --warn-soft: rgba(168,110,8,.10);
+    --bad: #b03427;
+    --bad-soft: rgba(176,52,39,.09);
+    --shadow: 0 1px 2px rgba(42,34,20,.05), 0 12px 32px rgba(42,34,20,.08);
     --radius: 14px;
+    --serif: Georgia, "Times New Roman", "Songti SC", "STSong", "SimSun", serif;
   }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
@@ -32,18 +33,23 @@
     color: var(--txt); background: var(--bg); min-height: 100vh; line-height: 1.7;
     -webkit-font-smoothing: antialiased;
   }
-  .wrap { max-width: 960px; margin: 0 auto; padding: 40px 22px 72px; }
+  .wrap { position: relative; z-index: 1; max-width: 960px; margin: 0 auto; padding: 40px 22px 72px; }
+  /* ── 纸质花纹（与首页一致） ── */
+  .pattern {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 64 64'%3E%3Cpath d='M32 24l8 8-8 8-8-8z' fill='none' stroke='%23b5432a' stroke-opacity='.055'/%3E%3Ccircle cx='32' cy='32' r='1.3' fill='%23b5432a' fill-opacity='.05'/%3E%3Ccircle cx='0' cy='0' r='1' fill='%23b5432a' fill-opacity='.04'/%3E%3Ccircle cx='64' cy='0' r='1' fill='%23b5432a' fill-opacity='.04'/%3E%3Ccircle cx='0' cy='64' r='1' fill='%23b5432a' fill-opacity='.04'/%3E%3Ccircle cx='64' cy='64' r='1' fill='%23b5432a' fill-opacity='.04'/%3E%3C/svg%3E");
+  }
 
   .badge {
     display: inline-flex; align-items: center; gap: 8px;
     font-size: 12px; font-weight: 600; letter-spacing: .4px;
     color: var(--accent); background: var(--accent-soft);
-    border: 1px solid rgba(79,110,247,.22); border-radius: 999px; padding: 5px 13px;
+    border: 1px solid rgba(181,67,42,.25); border-radius: 999px; padding: 5px 13px;
     text-decoration: none;
   }
   .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
-  .badge:hover { border-color: rgba(79,110,247,.5); }
-  h1 { font-size: 30px; margin: 14px 0 8px; font-weight: 800; letter-spacing: -.5px; }
+  .badge:hover { border-color: rgba(181,67,42,.5); }
+  h1 { font-family: var(--serif); font-size: 32px; margin: 14px 0 8px; font-weight: 800; letter-spacing: -.3px; }
   h1 .grad { color: var(--accent); }
   .lead { color: var(--sub); font-size: 14px; line-height: 1.85; max-width: 860px; margin: 0; }
   .lead b { color: var(--txt); }
@@ -65,7 +71,7 @@
     background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
     padding: 26px 28px; margin-top: 22px; box-shadow: var(--shadow);
   }
-  h2 { font-size: 20px; margin: 0 0 14px; font-weight: 800; letter-spacing: -.3px; }
+  h2 { font-family: var(--serif); font-size: 21px; margin: 0 0 14px; font-weight: 800; letter-spacing: -.2px; }
   h2 .no { color: var(--accent); margin-right: 8px; }
   h3 { font-size: 15.5px; margin: 26px 0 10px; font-weight: 700; }
   h3:first-of-type { margin-top: 18px; }
@@ -80,12 +86,12 @@
     color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 1px 7px;
   }
   pre {
-    background: #10182e; color: #d7e0f8; border-radius: 12px; padding: 16px 18px;
+    background: #262019; color: #e6d9bd; border-radius: 12px; padding: 16px 18px;
     overflow-x: auto; font-size: 12.5px; line-height: 1.7; margin: 12px 0;
     font-family: ui-monospace, Menlo, Consolas, monospace;
   }
   pre code { background: none; color: inherit; padding: 0; }
-  pre .cm { color: #6b7ba8; }
+  pre .cm { color: #a3987f; }
 
   table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 13px; }
   th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -96,10 +102,10 @@
 
   .tip {
     border-radius: 12px; padding: 13px 16px; font-size: 13px; margin: 14px 0; line-height: 1.75;
-    background: var(--accent-soft); border: 1px solid rgba(79,110,247,.18); border-left: 3px solid var(--accent);
+    background: var(--accent-soft); border: 1px solid rgba(181,67,42,.18); border-left: 3px solid var(--accent);
   }
-  .tip.ok { background: var(--ok-soft); border-color: rgba(14,159,110,.2); border-left-color: var(--ok); }
-  .tip.warn { background: var(--warn-soft); border-color: rgba(217,138,6,.2); border-left-color: var(--warn); }
+  .tip.ok { background: var(--ok-soft); border-color: rgba(77,124,91,.2); border-left-color: var(--ok); }
+  .tip.warn { background: var(--warn-soft); border-color: rgba(168,110,8,.2); border-left-color: var(--warn); }
   .tip b:first-child { margin-right: 4px; }
 
   .tag { display: inline-block; font-size: 11px; font-weight: 700; border-radius: 6px; padding: 1px 8px; margin-right: 4px; }
@@ -111,7 +117,7 @@
   .btn {
     display: inline-flex; align-items: center; gap: 6px; text-decoration: none;
     background: var(--accent); color: #fff; font-size: 13px; font-weight: 700;
-    border-radius: 10px; padding: 9px 18px; box-shadow: 0 4px 14px rgba(79,110,247,.28); transition: .16s;
+    border-radius: 10px; padding: 9px 18px; box-shadow: 0 4px 14px rgba(181,67,42,.28); transition: .16s;
   }
   .btn:hover { background: var(--accent-d); transform: translateY(-1px); }
 
@@ -126,6 +132,7 @@
 </style>
 </head>
 <body>
+<div class="pattern"></div>
 <div class="wrap">
   <header>
     <div class="backrow">
